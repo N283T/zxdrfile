@@ -144,6 +144,38 @@ as part of the [GROMACS](https://www.gromacs.org/) project, with modifications b
 
 Thanks to all the original authors for making this code available under the BSD 2-Clause license.
 
+If you use this library in academic work, please consider citing the original projects:
+
+```bibtex
+@article{McGibbon2015MDTraj,
+    author = {McGibbon, Robert T. and Beauchamp, Kyle A. and Harrigan, Matthew P.
+              and Klein, Christoph and Swails, Jason M. and Hern{\'a}ndez, Carlos X.
+              and Schwantes, Christian R. and Wang, Lee-Ping and Lane, Thomas J.
+              and Pande, Vijay S.},
+    title = {MDTraj: A Modern Open Library for the Analysis of
+             Molecular Dynamics Trajectories},
+    journal = {Biophysical Journal},
+    volume = {109},
+    number = {8},
+    pages = {1528--1532},
+    year = {2015},
+    doi = {10.1016/j.bpj.2015.08.015}
+}
+
+@article{Abraham2015GROMACS,
+    author = {Abraham, Mark James and Murtola, Teemu and Schulz, Roland
+              and P{\'a}ll, Szil{\'a}rd and Smith, Jeremy C. and Hess, Berk
+              and Lindahl, Erik},
+    title = {GROMACS: High performance molecular simulations through
+             multi-level parallelism from laptops to supercomputers},
+    journal = {SoftwareX},
+    volume = {1--2},
+    pages = {19--25},
+    year = {2015},
+    doi = {10.1016/j.softx.2015.06.001}
+}
+```
+
 ## License
 
 BSD 2-Clause License. See [LICENSE](LICENSE) for details.
