@@ -32,13 +32,13 @@ Then in your `build.zig`:
 
 ```zig
 const zxdrfile = b.dependency("zxdrfile", .{ .target = target, .optimize = optimize });
-mod.addImport("xdrfile", zxdrfile.module("xdrfile"));
+mod.addImport("zxdrfile", zxdrfile.module("zxdrfile"));
 ```
 
 ### Reading XTC
 
 ```zig
-const xdrfile = @import("xdrfile");
+const xdrfile = @import("zxdrfile");
 
 var reader = try xdrfile.XtcReader.open(allocator, "trajectory.xtc");
 defer reader.close();
@@ -57,7 +57,7 @@ while (true) {
 ### Reading TRR
 
 ```zig
-const xdrfile = @import("xdrfile");
+const xdrfile = @import("zxdrfile");
 
 var reader = try xdrfile.TrrReader.open(allocator, "trajectory.trr");
 defer reader.close();

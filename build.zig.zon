@@ -1,6 +1,6 @@
 .{
     .name = .zxdrfile,
-    .version = "0.1.0",
+    .version = "0.1.1",
     .fingerprint = 0x3a99db92f6908624,
     .minimum_zig_version = "0.15.2",
     .paths = .{

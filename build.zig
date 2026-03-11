@@ -4,7 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const mod = b.addModule("xdrfile", .{
+    const mod = b.addModule("zxdrfile", .{
         .root_source_file = b.path("src/xdrfile.zig"),
         .target = target,
         .optimize = optimize,
@@ -30,7 +30,7 @@ pub fn build(b: *std.Build) void {
 
     // Documentation
     const lib = b.addLibrary(.{
-        .name = "xdrfile",
+        .name = "zxdrfile",
         .root_module = mod,
     });
     const install_docs = b.addInstallDirectory(.{
