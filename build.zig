@@ -27,4 +27,19 @@ pub fn build(b: *std.Build) void {
     const validate_step = b.step("validate", "Run validation tests against mdtraj reference");
     validate_step.dependOn(&run_validation.step);
     test_step.dependOn(&run_validation.step);
+
+    // Benchmark (always ReleaseFast for meaningful results)
+    const bench_mod = b.addModule("benchmark", .{
+        .root_source_file = b.path("src/benchmark.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    const bench_exe = b.addExecutable(.{
+        .name = "benchmark",
+        .root_module = bench_mod,
+    });
+    b.installArtifact(bench_exe);
+    const run_bench = b.addRunArtifact(bench_exe);
+    const bench_step = b.step("bench", "Run benchmarks (ReleaseFast)");
+    bench_step.dependOn(&run_bench.step);
 }

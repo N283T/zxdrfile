@@ -1,3 +1,5 @@
 zig-cache/
 zig-out/
 .zig-cache/
+benchmarks/md_data/
+benchmarks/c_reference/bench
