@@ -519,6 +519,7 @@ pub const XtcReader = struct {
 
             // Adjust smallidx based on compression efficiency
             smallidx += is_smaller;
+            if (smallidx < FIRSTIDX or smallidx >= LASTIDX) return -1;
             if (is_smaller < 0) {
                 smallnum = smaller;
                 if (smallidx > FIRSTIDX) {
