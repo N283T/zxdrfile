@@ -102,45 +102,26 @@ pub const XtcReader = struct {
             .buf1 = &[_]i32{},
             .buf2 = &[_]i32{},
         };
+        errdefer file.close();
 
         // Read first frame header to get natoms
-        const magic = reader.readInt() catch {
-            file.close();
-            return XtcError.ReadError;
-        };
-        if (magic != XTC_MAGIC) {
-            file.close();
-            return XtcError.InvalidMagic;
-        }
+        const magic = reader.readInt() catch return XtcError.ReadError;
+        if (magic != XTC_MAGIC) return XtcError.InvalidMagic;
 
-        reader.natoms = reader.readInt() catch {
-            file.close();
-            return XtcError.ReadError;
-        };
-        if (reader.natoms <= 0) {
-            file.close();
-            return XtcError.ReadError;
-        }
+        reader.natoms = reader.readInt() catch return XtcError.ReadError;
+        if (reader.natoms <= 0) return XtcError.ReadError;
 
         // Reset to beginning
-        file.seekTo(0) catch {
-            file.close();
-            return XtcError.ReadError;
-        };
+        file.seekTo(0) catch return XtcError.ReadError;
 
         // Allocate decompression buffers
         const natoms_u: usize = @intCast(reader.natoms);
-        const size3 = std.math.mul(usize, natoms_u, 3) catch {
-            file.close();
-            return XtcError.ReadError;
-        };
+        const size3 = std.math.mul(usize, natoms_u, 3) catch return XtcError.ReadError;
         reader.buf1 = allocator.alloc(i32, size3) catch return XtcError.OutOfMemory;
+        errdefer allocator.free(reader.buf1);
         // buf2: size3 * 1.2 for worst-case compression + 3 for bit decoder header
         const buf2_size: usize = size3 + size3 / 5;
-        reader.buf2 = allocator.alloc(i32, buf2_size + 3) catch {
-            allocator.free(reader.buf1);
-            return XtcError.OutOfMemory;
-        };
+        reader.buf2 = allocator.alloc(i32, buf2_size + 3) catch return XtcError.OutOfMemory;
 
         return reader;
     }
@@ -180,7 +161,8 @@ pub const XtcReader = struct {
         }
 
         // Allocate output coordinates
-        const size3: usize = @intCast(natoms * 3);
+        const natoms_u: usize = @intCast(natoms);
+        const size3 = std.math.mul(usize, natoms_u, 3) catch return XtcError.ReadError;
         const coords = self.allocator.alloc(f32, size3) catch return XtcError.OutOfMemory;
         errdefer self.allocator.free(coords);
 
@@ -206,13 +188,13 @@ pub const XtcReader = struct {
 
     fn readInt(self: *Self) !i32 {
         var buf: [4]u8 = undefined;
-        self.readExact(&buf) catch |err| return err;
+        try self.readExact(&buf);
         return @bitCast(std.mem.readInt(u32, &buf, .big));
     }
 
     fn readFloat(self: *Self) !f32 {
         var buf: [4]u8 = undefined;
-        self.readExact(&buf) catch |err| return err;
+        try self.readExact(&buf);
         return @bitCast(std.mem.readInt(u32, &buf, .big));
     }
 

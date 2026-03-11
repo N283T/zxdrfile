@@ -107,19 +107,14 @@ pub const TrrReader = struct {
             .allocator = allocator,
             .natoms = 0,
         };
+        errdefer file.close();
 
         // Read first header to get natoms
-        const header = reader.readHeader() catch |err| {
-            file.close();
-            return err;
-        };
+        const header = try reader.readHeader();
         reader.natoms = header.natoms;
 
         // Reset to beginning
-        file.seekTo(0) catch {
-            file.close();
-            return TrrError.ReadError;
-        };
+        file.seekTo(0) catch return TrrError.ReadError;
 
         return reader;
     }
@@ -278,19 +273,19 @@ pub const TrrReader = struct {
 
     fn readInt(self: *Self) !i32 {
         var buf: [4]u8 = undefined;
-        self.readExact(&buf) catch |err| return err;
+        try self.readExact(&buf);
         return @bitCast(std.mem.readInt(u32, &buf, .big));
     }
 
     fn readFloat(self: *Self) !f32 {
         var buf: [4]u8 = undefined;
-        self.readExact(&buf) catch |err| return err;
+        try self.readExact(&buf);
         return @bitCast(std.mem.readInt(u32, &buf, .big));
     }
 
     fn readDouble(self: *Self) !f64 {
         var buf: [8]u8 = undefined;
-        self.readExact(&buf) catch |err| return err;
+        try self.readExact(&buf);
         return @bitCast(std.mem.readInt(u64, &buf, .big));
     }
 
