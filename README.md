@@ -1,5 +1,8 @@
 # zxdrfile
 
+[![Zig](https://img.shields.io/badge/Zig-0.15.2+-f7a41d?logo=zig&logoColor=white)](https://ziglang.org/)
+[![License](https://img.shields.io/badge/License-BSD_2--Clause-blue.svg)](LICENSE)
+
 A Zig library for reading GROMACS XDR trajectory files (XTC and TRR formats).
 
 ## Features
