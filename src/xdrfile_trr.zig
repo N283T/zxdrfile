@@ -35,6 +35,7 @@
 //
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const native_endian = @import("builtin").cpu.arch.endian();
 
 pub const TrrError = error{
     FileNotFound,
@@ -48,6 +49,7 @@ pub const TrrError = error{
 const TRR_MAGIC: i32 = 1993;
 const DIM: usize = 3;
 const VERSION_STRING = "GMX_trn_file";
+const READ_BUF_SIZE = 65536;
 
 /// TRR frame header (matches t_trnheader from GROMACS)
 const TrrHeader = struct {
@@ -92,6 +94,8 @@ pub const TrrFrame = struct {
 /// TRR file reader
 pub const TrrReader = struct {
     file: std.fs.File,
+    reader: std.fs.File.Reader,
+    read_buf: [READ_BUF_SIZE]u8,
     allocator: Allocator,
     natoms: i32,
 
@@ -102,21 +106,25 @@ pub const TrrReader = struct {
             return TrrError.FileNotFound;
         };
 
-        var reader = Self{
+        var self = Self{
             .file = file,
+            .reader = undefined,
+            .read_buf = undefined,
             .allocator = allocator,
             .natoms = 0,
         };
+        self.reader = file.reader(&self.read_buf);
         errdefer file.close();
 
         // Read first header to get natoms
-        const header = try reader.readHeader();
-        reader.natoms = header.natoms;
+        const header = try self.readHeader();
+        self.natoms = header.natoms;
 
         // Reset to beginning
         file.seekTo(0) catch return TrrError.ReadError;
+        self.reader = file.reader(&self.read_buf);
 
-        return reader;
+        return self;
     }
 
     pub fn close(self: *Self) void {
@@ -143,7 +151,7 @@ pub const TrrReader = struct {
         if (header.box_size != 0) {
             if (header.is_double) {
                 var dbox: [DIM * DIM]f64 = undefined;
-                try self.readDoubles(&dbox);
+                try self.readDoublesBulk(&dbox);
                 for (0..DIM) |i| {
                     for (0..DIM) |j| {
                         box[i][j] = @floatCast(dbox[i * DIM + j]);
@@ -151,7 +159,7 @@ pub const TrrReader = struct {
                 }
             } else {
                 var fbox: [DIM * DIM]f32 = undefined;
-                try self.readFloats(&fbox);
+                try self.readFloatsBulk(&fbox);
                 for (0..DIM) |i| {
                     for (0..DIM) |j| {
                         box[i][j] = fbox[i * DIM + j];
@@ -271,44 +279,56 @@ pub const TrrReader = struct {
         return header;
     }
 
+    inline fn io(self: *Self) *std.io.Reader {
+        return &self.reader.interface;
+    }
+
     fn readInt(self: *Self) !i32 {
-        var buf: [4]u8 = undefined;
-        try self.readExact(&buf);
-        return @bitCast(std.mem.readInt(u32, &buf, .big));
+        const buf = self.io().peekArray(4) catch return TrrError.EndOfFile;
+        self.io().toss(4);
+        return @bitCast(std.mem.readInt(u32, buf, .big));
     }
 
     fn readFloat(self: *Self) !f32 {
-        var buf: [4]u8 = undefined;
-        try self.readExact(&buf);
-        return @bitCast(std.mem.readInt(u32, &buf, .big));
+        const buf = self.io().peekArray(4) catch return TrrError.EndOfFile;
+        self.io().toss(4);
+        return @bitCast(std.mem.readInt(u32, buf, .big));
     }
 
     fn readDouble(self: *Self) !f64 {
-        var buf: [8]u8 = undefined;
-        try self.readExact(&buf);
-        return @bitCast(std.mem.readInt(u64, &buf, .big));
+        const buf = self.io().peekArray(8) catch return TrrError.EndOfFile;
+        self.io().toss(8);
+        return @bitCast(std.mem.readInt(u64, buf, .big));
     }
 
     fn readExact(self: *Self, dest: []u8) !void {
-        const n = self.file.readAll(dest) catch return TrrError.ReadError;
-        if (n < dest.len) return TrrError.EndOfFile;
+        self.io().readSliceAll(dest) catch return TrrError.ReadError;
     }
 
-    fn readFloats(self: *Self, dest: []f32) !void {
-        for (dest) |*d| {
-            d.* = try self.readFloat();
+    /// Bulk read f32 array: read raw bytes then byte-swap in place.
+    fn readFloatsBulk(self: *Self, dest: []f32) !void {
+        const bytes: []u8 = @as([*]u8, @ptrCast(dest.ptr))[0 .. dest.len * 4];
+        try self.readExact(bytes);
+        if (native_endian != .big) {
+            for (dest) |*d| {
+                d.* = @bitCast(std.mem.bigToNative(u32, @bitCast(d.*)));
+            }
         }
     }
 
-    fn readDoubles(self: *Self, dest: []f64) !void {
-        for (dest) |*d| {
-            d.* = try self.readDouble();
+    /// Bulk read f64 array: read raw bytes then byte-swap in place.
+    fn readDoublesBulk(self: *Self, dest: []f64) !void {
+        const bytes: []u8 = @as([*]u8, @ptrCast(dest.ptr))[0 .. dest.len * 8];
+        try self.readExact(bytes);
+        if (native_endian != .big) {
+            for (dest) |*d| {
+                d.* = @bitCast(std.mem.bigToNative(u64, @bitCast(d.*)));
+            }
         }
     }
 
     fn skipBytes(self: *Self, count: usize) !void {
-        const pos = self.file.getPos() catch return TrrError.ReadError;
-        self.file.seekTo(pos + count) catch return TrrError.ReadError;
+        self.io().discardAll(count) catch return TrrError.ReadError;
     }
 
     /// Read a vector array (coords/velocities/forces), handling float/double conversion.
@@ -317,14 +337,21 @@ pub const TrrReader = struct {
         errdefer self.allocator.free(result);
 
         if (is_double) {
-            for (0..size3) |i| {
-                const d = try self.readDouble();
-                result[i] = @floatCast(d);
+            // Read doubles in chunks to avoid huge temp allocation
+            const chunk_size: usize = 1024;
+            var tmp: [chunk_size]f64 = undefined;
+            var i: usize = 0;
+            while (i < size3) {
+                const remaining = size3 - i;
+                const n = if (remaining < chunk_size) remaining else chunk_size;
+                try self.readDoublesBulk(tmp[0..n]);
+                for (0..n) |j| {
+                    result[i + j] = @floatCast(tmp[j]);
+                }
+                i += n;
             }
         } else {
-            for (0..size3) |i| {
-                result[i] = try self.readFloat();
-            }
+            try self.readFloatsBulk(result);
         }
         return result;
     }
