@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.1] - 2026-03-11
+
+### Changed
+
+- Unify module name to `zxdrfile` (was `xdrfile` in build.zig, now matches package name)
+- Update README usage examples to reflect new module name
+
 ## [0.1.0] - 2026-03-11
 
 ### Added
