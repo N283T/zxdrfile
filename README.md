@@ -1,6 +1,7 @@
 # zxdrfile
 
 [![Zig](https://img.shields.io/badge/Zig-0.15.2+-f7a41d?logo=zig&logoColor=white)](https://ziglang.org/)
+[![CI](https://github.com/N283T/zxdrfile/actions/workflows/ci.yml/badge.svg)](https://github.com/N283T/zxdrfile/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-BSD_2--Clause-blue.svg)](LICENSE)
 
 A Zig library for reading GROMACS XDR trajectory files (XTC and TRR formats).
@@ -82,6 +83,10 @@ zig build bench     # Run benchmarks (ReleaseFast)
 ## Requirements
 
 - Zig 0.15.2 or later
+
+> **Note:** Zig has not yet reached 1.0 and its standard library API changes
+> frequently between versions. This library may not compile on versions other
+> than the one specified above. Check the CI status badge for current compatibility.
 
 ## Differences from the Original C Library
 
