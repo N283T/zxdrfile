@@ -80,6 +80,45 @@ zig build bench     # Run benchmarks (ReleaseFast)
 
 - Zig 0.15.2 or later
 
+## Differences from the Original C Library
+
+This is not a line-by-line translation. Key differences:
+
+- **Read-only API** -- Only reading is supported (no writing)
+- **Zig-native error handling** -- Uses Zig's error union types instead of C-style return codes
+- **Allocator-aware** -- All memory allocation goes through a caller-provided `std.mem.Allocator`
+- **Buffered I/O** -- 64KB read buffer via `std.fs.File.Reader`, reducing syscall overhead
+- **Bulk reads with in-place byte-swap** -- TRR vectors are read in a single call and byte-swapped in place, instead of one-element-at-a-time XDR decoding
+- **Overflow-safe arithmetic** -- Uses `std.math.mul` for bounds checking on atom count calculations
+- **Bounds checks on smallidx** -- Validates compression index against `FIRSTIDX`/`LASTIDX` to prevent out-of-bounds access
+
+## Performance
+
+Benchmarked on Apple M4 Pro, reading all frames from trajectory files (ReleaseFast).
+C reference uses the original xdrfile library from mdtraj, compiled with `-O2`.
+
+### XTC (compressed)
+
+| File | Atoms | Frames | Size | zxdrfile | C (mdtraj) | Speedup |
+|------|------:|-------:|-----:|---------:|-----------:|--------:|
+| 3tvj_I | 531 | 1,001 | 2.4 MB | 113 MB/s | 184 MB/s | 0.6x |
+| 5wvo_C | 3,858 | 1,001 | 17 MB | 261 MB/s | 246 MB/s | 1.1x |
+| 6sup_A | 33,377 | 1,001 | 148 MB | 321 MB/s | 284 MB/s | 1.1x |
+
+XTC performance is comparable to C. The decompression algorithm dominates runtime,
+so I/O optimizations have limited impact.
+
+### TRR (uncompressed)
+
+| File | Atoms | Frames | Size | zxdrfile | C (mdtraj) | Speedup |
+|------|------:|-------:|-----:|---------:|-----------:|--------:|
+| 3tvj_I | 531 | 1,001 | 6.2 MB | 1,245 MB/s | 226 MB/s | **5.5x** |
+| 5wvo_C | 3,858 | 1,001 | 44 MB | 5,256 MB/s | 199 MB/s | **26x** |
+| 6sup_A | 33,377 | 1,001 | 383 MB | 8,298 MB/s | 231 MB/s | **36x** |
+
+TRR is dramatically faster because the C library decodes each 4-byte value individually
+via XDR function calls, while zxdrfile reads entire vectors in bulk and byte-swaps in place.
+
 ## Acknowledgments
 
 This library is a Zig port of the xdrfile C library from the
