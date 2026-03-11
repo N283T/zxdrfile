@@ -95,7 +95,7 @@ pub const TrrFrame = struct {
 pub const TrrReader = struct {
     file: std.fs.File,
     reader: std.fs.File.Reader,
-    read_buf: [READ_BUF_SIZE]u8,
+    read_buf: *[READ_BUF_SIZE]u8,
     allocator: Allocator,
     natoms: i32,
 
@@ -105,16 +105,19 @@ pub const TrrReader = struct {
         const file = std.fs.cwd().openFile(path, .{}) catch {
             return TrrError.FileNotFound;
         };
+        errdefer file.close();
+
+        const read_buf = allocator.create([READ_BUF_SIZE]u8) catch return TrrError.OutOfMemory;
+        errdefer allocator.destroy(read_buf);
 
         var self = Self{
             .file = file,
             .reader = undefined,
-            .read_buf = undefined,
+            .read_buf = read_buf,
             .allocator = allocator,
             .natoms = 0,
         };
-        self.reader = file.reader(&self.read_buf);
-        errdefer file.close();
+        self.reader = file.reader(read_buf);
 
         // Read first header to get natoms
         const header = try self.readHeader();
@@ -122,12 +125,13 @@ pub const TrrReader = struct {
 
         // Reset to beginning
         file.seekTo(0) catch return TrrError.ReadError;
-        self.reader = file.reader(&self.read_buf);
+        self.reader = file.reader(read_buf);
 
         return self;
     }
 
     pub fn close(self: *Self) void {
+        self.allocator.destroy(self.read_buf);
         self.file.close();
     }
 
@@ -284,25 +288,22 @@ pub const TrrReader = struct {
     }
 
     fn readInt(self: *Self) !i32 {
-        const buf = self.io().peekArray(4) catch return TrrError.EndOfFile;
-        self.io().toss(4);
+        const buf = self.io().takeArray(4) catch |err| return mapIoError(err);
         return @bitCast(std.mem.readInt(u32, buf, .big));
     }
 
     fn readFloat(self: *Self) !f32 {
-        const buf = self.io().peekArray(4) catch return TrrError.EndOfFile;
-        self.io().toss(4);
+        const buf = self.io().takeArray(4) catch |err| return mapIoError(err);
         return @bitCast(std.mem.readInt(u32, buf, .big));
     }
 
     fn readDouble(self: *Self) !f64 {
-        const buf = self.io().peekArray(8) catch return TrrError.EndOfFile;
-        self.io().toss(8);
+        const buf = self.io().takeArray(8) catch |err| return mapIoError(err);
         return @bitCast(std.mem.readInt(u64, buf, .big));
     }
 
     fn readExact(self: *Self, dest: []u8) !void {
-        self.io().readSliceAll(dest) catch return TrrError.ReadError;
+        self.io().readSliceAll(dest) catch |err| return mapIoError(err);
     }
 
     /// Bulk read f32 array: read raw bytes then byte-swap in place.
@@ -328,7 +329,14 @@ pub const TrrReader = struct {
     }
 
     fn skipBytes(self: *Self, count: usize) !void {
-        self.io().discardAll(count) catch return TrrError.ReadError;
+        self.io().discardAll(count) catch |err| return mapIoError(err);
+    }
+
+    fn mapIoError(err: std.io.Reader.Error) TrrError {
+        return switch (err) {
+            error.EndOfStream => TrrError.EndOfFile,
+            error.ReadFailed => TrrError.ReadError,
+        };
     }
 
     /// Read a vector array (coords/velocities/forces), handling float/double conversion.
