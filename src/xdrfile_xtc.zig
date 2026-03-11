@@ -36,6 +36,7 @@
 //
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const native_endian = @import("builtin").cpu.arch.endian();
 
 pub const XtcError = error{
     FileNotFound,
@@ -78,9 +79,13 @@ pub const XtcFrame = struct {
     }
 };
 
+const READ_BUF_SIZE = 65536;
+
 /// XTC file reader
 pub const XtcReader = struct {
     file: std.fs.File,
+    reader: std.fs.File.Reader,
+    read_buf: *[READ_BUF_SIZE]u8,
     allocator: Allocator,
     natoms: i32,
     // buf1: integer coordinate buffer for decompression (thiscoord storage)
@@ -94,41 +99,49 @@ pub const XtcReader = struct {
         const file = std.fs.cwd().openFile(path, .{}) catch {
             return XtcError.FileNotFound;
         };
+        errdefer file.close();
 
-        var reader = Self{
+        const read_buf = allocator.create([READ_BUF_SIZE]u8) catch return XtcError.OutOfMemory;
+        errdefer allocator.destroy(read_buf);
+
+        var self = Self{
             .file = file,
+            .reader = undefined,
+            .read_buf = read_buf,
             .allocator = allocator,
             .natoms = 0,
             .buf1 = &[_]i32{},
             .buf2 = &[_]i32{},
         };
-        errdefer file.close();
+        self.reader = file.reader(read_buf);
 
         // Read first frame header to get natoms
-        const magic = reader.readInt() catch return XtcError.ReadError;
+        const magic = self.readInt() catch return XtcError.ReadError;
         if (magic != XTC_MAGIC) return XtcError.InvalidMagic;
 
-        reader.natoms = reader.readInt() catch return XtcError.ReadError;
-        if (reader.natoms <= 0) return XtcError.ReadError;
+        self.natoms = self.readInt() catch return XtcError.ReadError;
+        if (self.natoms <= 0) return XtcError.ReadError;
 
         // Reset to beginning
         file.seekTo(0) catch return XtcError.ReadError;
+        self.reader = file.reader(read_buf);
 
         // Allocate decompression buffers
-        const natoms_u: usize = @intCast(reader.natoms);
+        const natoms_u: usize = @intCast(self.natoms);
         const size3 = std.math.mul(usize, natoms_u, 3) catch return XtcError.ReadError;
-        reader.buf1 = allocator.alloc(i32, size3) catch return XtcError.OutOfMemory;
-        errdefer allocator.free(reader.buf1);
+        self.buf1 = allocator.alloc(i32, size3) catch return XtcError.OutOfMemory;
+        errdefer allocator.free(self.buf1);
         // buf2: size3 * 1.2 for worst-case compression + 3 for bit decoder header
         const buf2_size: usize = size3 + size3 / 5;
-        reader.buf2 = allocator.alloc(i32, buf2_size + 3) catch return XtcError.OutOfMemory;
+        self.buf2 = allocator.alloc(i32, buf2_size + 3) catch return XtcError.OutOfMemory;
 
-        return reader;
+        return self;
     }
 
     pub fn close(self: *Self) void {
         self.allocator.free(self.buf1);
         self.allocator.free(self.buf2);
+        self.allocator.destroy(self.read_buf);
         self.file.close();
     }
 
@@ -186,16 +199,25 @@ pub const XtcReader = struct {
     // XDR I/O (big-endian, 4 bytes per element)
     // ============================================
 
+    inline fn io(self: *Self) *std.io.Reader {
+        return &self.reader.interface;
+    }
+
+    fn mapIoError(err: std.io.Reader.Error) XtcError {
+        return switch (err) {
+            error.EndOfStream => XtcError.EndOfFile,
+            error.ReadFailed => XtcError.ReadError,
+        };
+    }
+
     fn readInt(self: *Self) !i32 {
-        var buf: [4]u8 = undefined;
-        try self.readExact(&buf);
-        return @bitCast(std.mem.readInt(u32, &buf, .big));
+        const buf = self.io().takeArray(4) catch |err| return mapIoError(err);
+        return @bitCast(std.mem.readInt(u32, buf, .big));
     }
 
     fn readFloat(self: *Self) !f32 {
-        var buf: [4]u8 = undefined;
-        try self.readExact(&buf);
-        return @bitCast(std.mem.readInt(u32, &buf, .big));
+        const buf = self.io().takeArray(4) catch |err| return mapIoError(err);
+        return @bitCast(std.mem.readInt(u32, buf, .big));
     }
 
     fn readOpaque(self: *Self, dest: []u8) !void {
@@ -203,14 +225,12 @@ pub const XtcReader = struct {
         // XDR opaque data is padded to 4-byte boundary
         const padding = (4 - (dest.len % 4)) % 4;
         if (padding > 0) {
-            var pad_buf: [3]u8 = undefined;
-            try self.readExact(pad_buf[0..padding]);
+            self.io().discardAll(padding) catch |err| return mapIoError(err);
         }
     }
 
     fn readExact(self: *Self, dest: []u8) !void {
-        const n = self.file.readAll(dest) catch return XtcError.ReadError;
-        if (n < dest.len) return XtcError.EndOfFile;
+        self.io().readSliceAll(dest) catch |err| return mapIoError(err);
     }
 
     // ============================================
