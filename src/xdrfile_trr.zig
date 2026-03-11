@@ -278,23 +278,25 @@ pub const TrrReader = struct {
 
     fn readInt(self: *Self) !i32 {
         var buf: [4]u8 = undefined;
-        const n = self.file.read(&buf) catch return TrrError.ReadError;
-        if (n < 4) return TrrError.EndOfFile;
+        self.readExact(&buf) catch |err| return err;
         return @bitCast(std.mem.readInt(u32, &buf, .big));
     }
 
     fn readFloat(self: *Self) !f32 {
         var buf: [4]u8 = undefined;
-        const n = self.file.read(&buf) catch return TrrError.ReadError;
-        if (n < 4) return TrrError.EndOfFile;
+        self.readExact(&buf) catch |err| return err;
         return @bitCast(std.mem.readInt(u32, &buf, .big));
     }
 
     fn readDouble(self: *Self) !f64 {
         var buf: [8]u8 = undefined;
-        const n = self.file.read(&buf) catch return TrrError.ReadError;
-        if (n < 8) return TrrError.EndOfFile;
+        self.readExact(&buf) catch |err| return err;
         return @bitCast(std.mem.readInt(u64, &buf, .big));
+    }
+
+    fn readExact(self: *Self, dest: []u8) !void {
+        const n = self.file.readAll(dest) catch return TrrError.ReadError;
+        if (n < dest.len) return TrrError.EndOfFile;
     }
 
     fn readFloats(self: *Self, dest: []f32) !void {
