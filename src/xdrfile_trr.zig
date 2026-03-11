@@ -107,19 +107,14 @@ pub const TrrReader = struct {
             .allocator = allocator,
             .natoms = 0,
         };
+        errdefer file.close();
 
         // Read first header to get natoms
-        const header = reader.readHeader() catch |err| {
-            file.close();
-            return err;
-        };
+        const header = try reader.readHeader();
         reader.natoms = header.natoms;
 
         // Reset to beginning
-        file.seekTo(0) catch {
-            file.close();
-            return TrrError.ReadError;
-        };
+        file.seekTo(0) catch return TrrError.ReadError;
 
         return reader;
     }
@@ -278,23 +273,25 @@ pub const TrrReader = struct {
 
     fn readInt(self: *Self) !i32 {
         var buf: [4]u8 = undefined;
-        const n = self.file.read(&buf) catch return TrrError.ReadError;
-        if (n < 4) return TrrError.EndOfFile;
+        try self.readExact(&buf);
         return @bitCast(std.mem.readInt(u32, &buf, .big));
     }
 
     fn readFloat(self: *Self) !f32 {
         var buf: [4]u8 = undefined;
-        const n = self.file.read(&buf) catch return TrrError.ReadError;
-        if (n < 4) return TrrError.EndOfFile;
+        try self.readExact(&buf);
         return @bitCast(std.mem.readInt(u32, &buf, .big));
     }
 
     fn readDouble(self: *Self) !f64 {
         var buf: [8]u8 = undefined;
-        const n = self.file.read(&buf) catch return TrrError.ReadError;
-        if (n < 8) return TrrError.EndOfFile;
+        try self.readExact(&buf);
         return @bitCast(std.mem.readInt(u64, &buf, .big));
+    }
+
+    fn readExact(self: *Self, dest: []u8) !void {
+        const n = self.file.readAll(dest) catch return TrrError.ReadError;
+        if (n < dest.len) return TrrError.EndOfFile;
     }
 
     fn readFloats(self: *Self, dest: []f32) !void {

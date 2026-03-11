@@ -102,28 +102,26 @@ pub const XtcReader = struct {
             .buf1 = &[_]i32{},
             .buf2 = &[_]i32{},
         };
+        errdefer file.close();
 
         // Read first frame header to get natoms
         const magic = reader.readInt() catch return XtcError.ReadError;
-        if (magic != XTC_MAGIC) {
-            file.close();
-            return XtcError.InvalidMagic;
-        }
+        if (magic != XTC_MAGIC) return XtcError.InvalidMagic;
 
         reader.natoms = reader.readInt() catch return XtcError.ReadError;
+        if (reader.natoms <= 0) return XtcError.ReadError;
 
         // Reset to beginning
         file.seekTo(0) catch return XtcError.ReadError;
 
         // Allocate decompression buffers
-        const size3: usize = @intCast(reader.natoms * 3);
+        const natoms_u: usize = @intCast(reader.natoms);
+        const size3 = std.math.mul(usize, natoms_u, 3) catch return XtcError.ReadError;
         reader.buf1 = allocator.alloc(i32, size3) catch return XtcError.OutOfMemory;
+        errdefer allocator.free(reader.buf1);
         // buf2: size3 * 1.2 for worst-case compression + 3 for bit decoder header
         const buf2_size: usize = size3 + size3 / 5;
-        reader.buf2 = allocator.alloc(i32, buf2_size + 3) catch {
-            allocator.free(reader.buf1);
-            return XtcError.OutOfMemory;
-        };
+        reader.buf2 = allocator.alloc(i32, buf2_size + 3) catch return XtcError.OutOfMemory;
 
         return reader;
     }
@@ -163,7 +161,8 @@ pub const XtcReader = struct {
         }
 
         // Allocate output coordinates
-        const size3: usize = @intCast(natoms * 3);
+        const natoms_u: usize = @intCast(natoms);
+        const size3 = std.math.mul(usize, natoms_u, 3) catch return XtcError.ReadError;
         const coords = self.allocator.alloc(f32, size3) catch return XtcError.OutOfMemory;
         errdefer self.allocator.free(coords);
 
@@ -189,27 +188,29 @@ pub const XtcReader = struct {
 
     fn readInt(self: *Self) !i32 {
         var buf: [4]u8 = undefined;
-        const n = self.file.read(&buf) catch return XtcError.ReadError;
-        if (n < 4) return XtcError.EndOfFile;
+        try self.readExact(&buf);
         return @bitCast(std.mem.readInt(u32, &buf, .big));
     }
 
     fn readFloat(self: *Self) !f32 {
         var buf: [4]u8 = undefined;
-        const n = self.file.read(&buf) catch return XtcError.ReadError;
-        if (n < 4) return XtcError.EndOfFile;
+        try self.readExact(&buf);
         return @bitCast(std.mem.readInt(u32, &buf, .big));
     }
 
     fn readOpaque(self: *Self, dest: []u8) !void {
-        const n = self.file.readAll(dest) catch return XtcError.ReadError;
-        if (n < dest.len) return XtcError.EndOfFile;
+        try self.readExact(dest);
         // XDR opaque data is padded to 4-byte boundary
         const padding = (4 - (dest.len % 4)) % 4;
         if (padding > 0) {
             var pad_buf: [3]u8 = undefined;
-            _ = self.file.read(pad_buf[0..padding]) catch return XtcError.ReadError;
+            try self.readExact(pad_buf[0..padding]);
         }
+    }
+
+    fn readExact(self: *Self, dest: []u8) !void {
+        const n = self.file.readAll(dest) catch return XtcError.ReadError;
+        if (n < dest.len) return XtcError.EndOfFile;
     }
 
     // ============================================
@@ -349,14 +350,17 @@ pub const XtcReader = struct {
         // Read number of atoms
         const lsize: i32 = self.readInt() catch return -1;
         if (lsize <= 0) return -1;
-        const size3: usize = @intCast(lsize * 3);
+        if (lsize != self.natoms) return -1;
+        const lsize_u: usize = @intCast(lsize);
+        const size3 = std.math.mul(usize, lsize_u, 3) catch return -1;
+        if (size3 != coords.len or size3 > buf1.len) return -1;
 
         // Don't bother with compression for 9 atoms or less
         if (lsize <= 9) {
             for (0..size3) |i| {
                 coords[i] = self.readFloat() catch return -1;
             }
-            return @divTrunc(lsize, 3);
+            return lsize;
         }
 
         // Read precision
@@ -414,7 +418,10 @@ pub const XtcReader = struct {
 
         // Read compressed data length and payload
         const data_len = self.readInt() catch return -1;
+        if (data_len < 0) return -1;
         const data_len_u: usize = @intCast(data_len);
+        const buf2_payload_capacity = std.math.mul(usize, buf2.len - 3, @sizeOf(i32)) catch return -1;
+        if (data_len_u > buf2_payload_capacity) return -1;
 
         const cbuf: [*]u8 = @ptrCast(@alignCast(buf2.ptr + 3));
         self.readOpaque(cbuf[0..data_len_u]) catch return -1;
