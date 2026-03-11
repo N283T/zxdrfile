@@ -6,6 +6,8 @@
 
 A Zig library for reading GROMACS XDR trajectory files (XTC and TRR formats).
 
+[**API Documentation**](https://n283t.github.io/zxdrfile/)
+
 ## Features
 
 - **XTC reader** -- Compressed trajectory format with 3D coordinate decompression
