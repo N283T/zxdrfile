@@ -44,6 +44,9 @@ pub const TrrError = error{
     EndOfFile,
     ReadError,
     OutOfMemory,
+    WriteError,
+    InvalidAtomCount,
+    InvalidFrameData,
 };
 
 const TRR_MAGIC: i32 = 1993;
@@ -366,6 +369,235 @@ pub const TrrReader = struct {
 };
 
 // ============================================
+// TRR Writer
+// ============================================
+
+const WRITE_BUF_SIZE = 65536;
+
+/// TRR file writer (single-precision output)
+pub const TrrWriter = struct {
+    file: std.fs.File,
+    writer: std.fs.File.Writer,
+    write_buf: *[WRITE_BUF_SIZE]u8,
+    allocator: Allocator,
+    natoms: i32,
+
+    const Self = @This();
+
+    pub const Mode = enum { write, append };
+
+    pub fn open(allocator: Allocator, path: []const u8, natoms: i32, mode: Mode) !Self {
+        if (natoms <= 0) return TrrError.InvalidAtomCount;
+
+        switch (mode) {
+            .write => {
+                const file = std.fs.cwd().createFile(path, .{}) catch {
+                    return TrrError.WriteError;
+                };
+                errdefer file.close();
+
+                const write_buf = allocator.create([WRITE_BUF_SIZE]u8) catch return TrrError.OutOfMemory;
+                errdefer allocator.destroy(write_buf);
+
+                return Self{
+                    .file = file,
+                    .writer = file.writer(write_buf),
+                    .write_buf = write_buf,
+                    .allocator = allocator,
+                    .natoms = natoms,
+                };
+            },
+            .append => {
+                const file = std.fs.cwd().openFile(path, .{ .mode = .read_write }) catch {
+                    return TrrError.FileNotFound;
+                };
+                errdefer file.close();
+
+                const write_buf = allocator.create([WRITE_BUF_SIZE]u8) catch return TrrError.OutOfMemory;
+                errdefer allocator.destroy(write_buf);
+
+                // Validate natoms from existing file and get file size
+                const file_size = file.getEndPos() catch return TrrError.ReadError;
+                if (file_size > 0) {
+                    const read_buf = allocator.create([READ_BUF_SIZE]u8) catch return TrrError.OutOfMemory;
+                    defer allocator.destroy(read_buf);
+
+                    var temp_reader = TrrReader{
+                        .file = file,
+                        .reader = file.reader(read_buf),
+                        .read_buf = read_buf,
+                        .allocator = allocator,
+                        .natoms = 0,
+                    };
+                    const header = temp_reader.readHeader() catch return TrrError.ReadError;
+                    if (header.natoms != natoms) {
+                        return TrrError.InvalidAtomCount;
+                    }
+                }
+
+                // Use positional writer: set pos to end of file so writes
+                // append without disturbing the OS seek position.
+                var w = file.writer(write_buf);
+                w.pos = file_size;
+
+                return Self{
+                    .file = file,
+                    .writer = w,
+                    .write_buf = write_buf,
+                    .allocator = allocator,
+                    .natoms = natoms,
+                };
+            },
+        }
+    }
+
+    pub fn close(self: *Self) !void {
+        self.writer.interface.flush() catch return TrrError.WriteError;
+        self.allocator.destroy(self.write_buf);
+        self.file.close();
+    }
+
+    pub fn writeFrame(self: *Self, frame: TrrFrame) !void {
+        const natoms_u: usize = @intCast(self.natoms);
+        const size3 = natoms_u * DIM;
+
+        // Validate frame data consistency
+        if (frame.has_x) {
+            const coords = frame.coords orelse return TrrError.InvalidFrameData;
+            if (coords.len != size3) return TrrError.InvalidFrameData;
+        }
+        if (frame.has_v) {
+            const vels = frame.velocities orelse return TrrError.InvalidFrameData;
+            if (vels.len != size3) return TrrError.InvalidFrameData;
+        }
+        if (frame.has_f) {
+            const forces = frame.forces orelse return TrrError.InvalidFrameData;
+            if (forces.len != size3) return TrrError.InvalidFrameData;
+        }
+
+        // Compute sizes
+        const float_size: i32 = @sizeOf(f32);
+        const box_is_nonzero = blk: {
+            for (0..DIM) |i| {
+                for (0..DIM) |j| {
+                    if (frame.box[i][j] != 0.0) break :blk true;
+                }
+            }
+            break :blk false;
+        };
+
+        const header = TrrHeader{
+            .is_double = false,
+            .ir_size = 0,
+            .e_size = 0,
+            .box_size = if (box_is_nonzero) @as(i32, DIM * DIM) * float_size else 0,
+            .vir_size = 0,
+            .pres_size = 0,
+            .top_size = 0,
+            .sym_size = 0,
+            .x_size = if (frame.has_x) self.natoms * @as(i32, DIM) * float_size else 0,
+            .v_size = if (frame.has_v) self.natoms * @as(i32, DIM) * float_size else 0,
+            .f_size = if (frame.has_f) self.natoms * @as(i32, DIM) * float_size else 0,
+            .natoms = self.natoms,
+            .step = frame.step,
+            .nre = 0,
+            .time = frame.time,
+            .lambda = frame.lambda,
+        };
+
+        try self.writeHeader(header);
+
+        // Write box matrix
+        if (box_is_nonzero) {
+            for (0..DIM) |i| {
+                for (0..DIM) |j| {
+                    try self.writeFloat(frame.box[i][j]);
+                }
+            }
+        }
+
+        // Write coordinates
+        if (frame.has_x) {
+            try self.writeFloatsBulk(frame.coords.?);
+        }
+
+        // Write velocities
+        if (frame.has_v) {
+            try self.writeFloatsBulk(frame.velocities.?);
+        }
+
+        // Write forces
+        if (frame.has_f) {
+            try self.writeFloatsBulk(frame.forces.?);
+        }
+    }
+
+    // ============================================
+    // Internal I/O
+    // ============================================
+
+    inline fn io(self: *Self) *std.Io.Writer {
+        return &self.writer.interface;
+    }
+
+    fn writeInt(self: *Self, value: i32) !void {
+        const bytes = std.mem.toBytes(std.mem.nativeToBig(u32, @bitCast(value)));
+        self.io().writeAll(&bytes) catch return TrrError.WriteError;
+    }
+
+    fn writeFloat(self: *Self, value: f32) !void {
+        const bytes = std.mem.toBytes(std.mem.nativeToBig(u32, @bitCast(value)));
+        self.io().writeAll(&bytes) catch return TrrError.WriteError;
+    }
+
+    fn writeFloatsBulk(self: *Self, data: []const f32) !void {
+        for (data) |val| {
+            try self.writeFloat(val);
+        }
+    }
+
+    fn writeHeader(self: *Self, header: TrrHeader) !void {
+        // Magic number
+        try self.writeInt(TRR_MAGIC);
+
+        // Version string length (including null terminator)
+        const slen: i32 = @intCast(VERSION_STRING.len + 1);
+        try self.writeInt(slen);
+
+        // XDR string encoding: 4-byte length + data padded to 4-byte boundary
+        try self.writeInt(@intCast(VERSION_STRING.len));
+        self.io().writeAll(VERSION_STRING) catch return TrrError.WriteError;
+        // Pad to 4-byte boundary
+        const pad_len = ((VERSION_STRING.len + 3) / 4) * 4 - VERSION_STRING.len;
+        if (pad_len > 0) {
+            const padding = [_]u8{0} ** 4;
+            self.io().writeAll(padding[0..pad_len]) catch return TrrError.WriteError;
+        }
+
+        // Size fields
+        try self.writeInt(header.ir_size);
+        try self.writeInt(header.e_size);
+        try self.writeInt(header.box_size);
+        try self.writeInt(header.vir_size);
+        try self.writeInt(header.pres_size);
+        try self.writeInt(header.top_size);
+        try self.writeInt(header.sym_size);
+        try self.writeInt(header.x_size);
+        try self.writeInt(header.v_size);
+        try self.writeInt(header.f_size);
+        try self.writeInt(header.natoms);
+
+        // Step and nre
+        try self.writeInt(header.step);
+        try self.writeInt(header.nre);
+
+        // Time and lambda (single precision)
+        try self.writeFloat(header.time);
+        try self.writeFloat(header.lambda);
+    }
+};
+
+// ============================================
 // Tests
 // ============================================
 
@@ -479,4 +711,58 @@ test "read frame0.trr last frame" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.81), coords[21 * 3], tolerance);
     try std.testing.expectApproxEqAbs(@as(f32, 1.4), coords[21 * 3 + 1], tolerance);
     try std.testing.expectApproxEqAbs(@as(f32, 1.11), coords[21 * 3 + 2], tolerance);
+}
+
+test "TrrWriter write and read back single frame" {
+    const allocator = std.testing.allocator;
+    const tmp_path = "test_data/tmp_write_test.trr";
+
+    // Write a frame
+    {
+        var writer = try TrrWriter.open(allocator, tmp_path, 3, .write);
+        defer writer.close() catch {};
+
+        const coords = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0 };
+        const frame = TrrFrame{
+            .step = 42,
+            .time = 10.5,
+            .lambda = 0.0,
+            .box = [3][3]f32{
+                .{ 2.0, 0.0, 0.0 },
+                .{ 0.0, 3.0, 0.0 },
+                .{ 0.0, 0.0, 4.0 },
+            },
+            .has_x = true,
+            .has_v = false,
+            .has_f = false,
+            .coords = @constCast(&coords),
+            .velocities = null,
+            .forces = null,
+        };
+        try writer.writeFrame(frame);
+    }
+
+    // Read it back
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    var reader = try TrrReader.open(allocator, tmp_path);
+    defer reader.close();
+
+    try std.testing.expectEqual(@as(i32, 3), reader.getNumAtoms());
+
+    var frame = try reader.readFrame();
+    defer frame.deinit(allocator);
+
+    try std.testing.expectEqual(@as(i32, 42), frame.step);
+    try std.testing.expectApproxEqAbs(@as(f32, 10.5), frame.time, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), frame.lambda, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), frame.box[0][0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), frame.box[1][1], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), frame.box[2][2], 0.001);
+    try std.testing.expect(frame.has_x);
+
+    const coords = frame.coords.?;
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), coords[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), coords[4], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 9.0), coords[8], 0.001);
 }
