@@ -766,3 +766,243 @@ test "TrrWriter write and read back single frame" {
     try std.testing.expectApproxEqAbs(@as(f32, 5.0), coords[4], 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 9.0), coords[8], 0.001);
 }
+
+test "TrrWriter write frame with x, v, f" {
+    const allocator = std.testing.allocator;
+    const tmp_path = "test_data/tmp_write_xvf.trr";
+
+    {
+        var writer = try TrrWriter.open(allocator, tmp_path, 2, .write);
+        defer writer.close() catch {};
+
+        const coords = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 };
+        const vels = [_]f32{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6 };
+        const forces = [_]f32{ 10.0, 20.0, 30.0, 40.0, 50.0, 60.0 };
+        const frame = TrrFrame{
+            .step = 1,
+            .time = 0.0,
+            .lambda = 0.5,
+            .box = std.mem.zeroes([3][3]f32),
+            .has_x = true,
+            .has_v = true,
+            .has_f = true,
+            .coords = @constCast(&coords),
+            .velocities = @constCast(&vels),
+            .forces = @constCast(&forces),
+        };
+        try writer.writeFrame(frame);
+    }
+
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    var reader = try TrrReader.open(allocator, tmp_path);
+    defer reader.close();
+
+    var frame = try reader.readFrame();
+    defer frame.deinit(allocator);
+
+    try std.testing.expect(frame.has_x);
+    try std.testing.expect(frame.has_v);
+    try std.testing.expect(frame.has_f);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), frame.lambda, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.1), frame.velocities.?[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 10.0), frame.forces.?[0], 0.001);
+}
+
+test "TrrWriter write multiple frames" {
+    const allocator = std.testing.allocator;
+    const tmp_path = "test_data/tmp_write_multi.trr";
+
+    {
+        var writer = try TrrWriter.open(allocator, tmp_path, 2, .write);
+        defer writer.close() catch {};
+
+        for (0..5) |i| {
+            const step: i32 = @intCast(i);
+            const time: f32 = @as(f32, @floatFromInt(i)) * 0.5;
+            const val: f32 = @floatFromInt(i);
+            const coords = [_]f32{ val, val + 1.0, val + 2.0, val + 3.0, val + 4.0, val + 5.0 };
+            const frame = TrrFrame{
+                .step = step,
+                .time = time,
+                .lambda = 0.0,
+                .box = [3][3]f32{ .{ 1.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 }, .{ 0.0, 0.0, 1.0 } },
+                .has_x = true,
+                .has_v = false,
+                .has_f = false,
+                .coords = @constCast(&coords),
+                .velocities = null,
+                .forces = null,
+            };
+            try writer.writeFrame(frame);
+        }
+    }
+
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    var reader = try TrrReader.open(allocator, tmp_path);
+    defer reader.close();
+
+    var count: usize = 0;
+    while (true) {
+        var frame = reader.readFrame() catch |err| {
+            if (err == TrrError.EndOfFile) break;
+            return err;
+        };
+        defer frame.deinit(allocator);
+        try std.testing.expectEqual(@as(i32, @intCast(count)), frame.step);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 5), count);
+}
+
+test "TrrWriter append mode" {
+    const allocator = std.testing.allocator;
+    const tmp_path = "test_data/tmp_write_append.trr";
+
+    // Write 2 frames
+    {
+        var writer = try TrrWriter.open(allocator, tmp_path, 1, .write);
+        defer writer.close() catch {};
+
+        for (0..2) |i| {
+            const coords = [_]f32{ @floatFromInt(i), 0.0, 0.0 };
+            const frame = TrrFrame{
+                .step = @intCast(i),
+                .time = 0.0,
+                .lambda = 0.0,
+                .box = std.mem.zeroes([3][3]f32),
+                .has_x = true,
+                .has_v = false,
+                .has_f = false,
+                .coords = @constCast(&coords),
+                .velocities = null,
+                .forces = null,
+            };
+            try writer.writeFrame(frame);
+        }
+    }
+
+    // Append 3 more frames
+    {
+        var writer = try TrrWriter.open(allocator, tmp_path, 1, .append);
+        defer writer.close() catch {};
+
+        for (2..5) |i| {
+            const coords = [_]f32{ @floatFromInt(i), 0.0, 0.0 };
+            const frame = TrrFrame{
+                .step = @intCast(i),
+                .time = 0.0,
+                .lambda = 0.0,
+                .box = std.mem.zeroes([3][3]f32),
+                .has_x = true,
+                .has_v = false,
+                .has_f = false,
+                .coords = @constCast(&coords),
+                .velocities = null,
+                .forces = null,
+            };
+            try writer.writeFrame(frame);
+        }
+    }
+
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    // Read all 5 frames
+    var reader = try TrrReader.open(allocator, tmp_path);
+    defer reader.close();
+
+    var count: usize = 0;
+    while (true) {
+        var frame = reader.readFrame() catch |err| {
+            if (err == TrrError.EndOfFile) break;
+            return err;
+        };
+        defer frame.deinit(allocator);
+        try std.testing.expectEqual(@as(i32, @intCast(count)), frame.step);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 5), count);
+}
+
+test "TrrWriter rejects mismatched array length" {
+    const allocator = std.testing.allocator;
+    const tmp_path = "test_data/tmp_write_err.trr";
+
+    var writer = try TrrWriter.open(allocator, tmp_path, 2, .write);
+    defer {
+        writer.close() catch {};
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+    }
+
+    // coords has 3 elements but natoms=2 expects 6
+    const bad_coords = [_]f32{ 1.0, 2.0, 3.0 };
+    const frame = TrrFrame{
+        .step = 0,
+        .time = 0.0,
+        .lambda = 0.0,
+        .box = std.mem.zeroes([3][3]f32),
+        .has_x = true,
+        .has_v = false,
+        .has_f = false,
+        .coords = @constCast(&bad_coords),
+        .velocities = null,
+        .forces = null,
+    };
+    try std.testing.expectError(TrrError.InvalidFrameData, writer.writeFrame(frame));
+}
+
+test "TrrWriter rejects has_x=true with null coords" {
+    const allocator = std.testing.allocator;
+    const tmp_path = "test_data/tmp_write_null.trr";
+
+    var writer = try TrrWriter.open(allocator, tmp_path, 1, .write);
+    defer {
+        writer.close() catch {};
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+    }
+
+    const frame = TrrFrame{
+        .step = 0,
+        .time = 0.0,
+        .lambda = 0.0,
+        .box = std.mem.zeroes([3][3]f32),
+        .has_x = true,
+        .has_v = false,
+        .has_f = false,
+        .coords = null,
+        .velocities = null,
+        .forces = null,
+    };
+    try std.testing.expectError(TrrError.InvalidFrameData, writer.writeFrame(frame));
+}
+
+test "TrrWriter append rejects natoms mismatch" {
+    const allocator = std.testing.allocator;
+    const tmp_path = "test_data/tmp_write_natoms.trr";
+
+    // Write with natoms=2
+    {
+        var writer = try TrrWriter.open(allocator, tmp_path, 2, .write);
+        defer writer.close() catch {};
+        const coords = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 };
+        const frame = TrrFrame{
+            .step = 0,
+            .time = 0.0,
+            .lambda = 0.0,
+            .box = std.mem.zeroes([3][3]f32),
+            .has_x = true,
+            .has_v = false,
+            .has_f = false,
+            .coords = @constCast(&coords),
+            .velocities = null,
+            .forces = null,
+        };
+        try writer.writeFrame(frame);
+    }
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    // Try to append with natoms=3 — should fail
+    const result = TrrWriter.open(allocator, tmp_path, 3, .append);
+    try std.testing.expectError(TrrError.InvalidAtomCount, result);
+}
