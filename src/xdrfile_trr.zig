@@ -1006,3 +1006,75 @@ test "TrrWriter append rejects natoms mismatch" {
     const result = TrrWriter.open(allocator, tmp_path, 3, .append);
     try std.testing.expectError(TrrError.InvalidAtomCount, result);
 }
+
+test "TrrWriter round-trip with frame0.trr" {
+    const allocator = std.testing.allocator;
+    const tmp_path = "test_data/tmp_roundtrip.trr";
+
+    // Read original and write all frames to new file
+    {
+        var reader = try TrrReader.open(allocator, "test_data/frame0.trr");
+        defer reader.close();
+
+        const natoms = reader.getNumAtoms();
+
+        var writer = try TrrWriter.open(allocator, tmp_path, natoms, .write);
+        defer writer.close() catch {};
+
+        while (true) {
+            var frame = reader.readFrame() catch |err| {
+                if (err == TrrError.EndOfFile) break;
+                return err;
+            };
+            defer frame.deinit(allocator);
+            try writer.writeFrame(frame);
+        }
+    }
+
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    // Read back and compare with original
+    var reader_orig = try TrrReader.open(allocator, "test_data/frame0.trr");
+    defer reader_orig.close();
+
+    var reader_copy = try TrrReader.open(allocator, tmp_path);
+    defer reader_copy.close();
+
+    try std.testing.expectEqual(reader_orig.getNumAtoms(), reader_copy.getNumAtoms());
+
+    const tolerance: f32 = 0.0001;
+    var frame_count: usize = 0;
+    while (true) {
+        var orig = reader_orig.readFrame() catch |err| {
+            if (err == TrrError.EndOfFile) break;
+            return err;
+        };
+        defer orig.deinit(allocator);
+
+        var copy = reader_copy.readFrame() catch |err| {
+            if (err == TrrError.EndOfFile) {
+                return error.TestUnexpectedResult; // copy has fewer frames
+            }
+            return err;
+        };
+        defer copy.deinit(allocator);
+
+        try std.testing.expectEqual(orig.step, copy.step);
+        try std.testing.expectApproxEqAbs(orig.time, copy.time, tolerance);
+        try std.testing.expectApproxEqAbs(orig.lambda, copy.lambda, tolerance);
+        try std.testing.expectEqual(orig.has_x, copy.has_x);
+        try std.testing.expectEqual(orig.has_v, copy.has_v);
+        try std.testing.expectEqual(orig.has_f, copy.has_f);
+
+        if (orig.coords) |oc| {
+            const cc = copy.coords.?;
+            for (oc, cc) |o, c| {
+                try std.testing.expectApproxEqAbs(o, c, tolerance);
+            }
+        }
+
+        frame_count += 1;
+    }
+
+    try std.testing.expectEqual(@as(usize, 501), frame_count);
+}
