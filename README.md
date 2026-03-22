@@ -4,14 +4,14 @@
 [![CI](https://github.com/N283T/zxdrfile/actions/workflows/ci.yml/badge.svg)](https://github.com/N283T/zxdrfile/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-BSD_2--Clause-blue.svg)](LICENSE)
 
-A Zig library for reading GROMACS XDR trajectory files (XTC and TRR formats).
+A Zig library for reading and writing GROMACS XDR trajectory files (XTC and TRR formats).
 
 [**API Documentation**](https://n283t.github.io/zxdrfile/)
 
 ## Features
 
 - **XTC reader** -- Compressed trajectory format with 3D coordinate decompression
-- **TRR reader** -- Uncompressed trajectory format with coordinates, velocities, and forces
+- **TRR reader/writer** -- Uncompressed trajectory format with coordinates, velocities, and forces
 - **High performance** -- Buffered I/O with bulk reads and in-place byte-swapping
 - **Zero dependencies** -- Pure Zig, no C bindings required
 
@@ -74,6 +74,35 @@ while (true) {
 }
 ```
 
+### Writing TRR
+
+```zig
+const xdrfile = @import("zxdrfile");
+
+var writer = try xdrfile.TrrWriter.open(allocator, "output.trr", natoms, .write);
+defer writer.close() catch {};
+
+const frame = xdrfile.TrrFrame{
+    .step = 0,
+    .time = 0.0,
+    .lambda = 0.0,
+    .box = box,
+    .has_x = true,
+    .has_v = false,
+    .has_f = false,
+    .coords = coords,
+    .velocities = null,
+    .forces = null,
+};
+try writer.writeFrame(frame);
+```
+
+To append to an existing file, use `.append` mode:
+
+```zig
+var writer = try xdrfile.TrrWriter.open(allocator, "existing.trr", natoms, .append);
+```
+
 ## Building
 
 ```bash
@@ -94,7 +123,7 @@ zig build bench     # Run benchmarks (ReleaseFast)
 
 This is not a line-by-line translation. Key differences:
 
-- **Read-only API** -- Only reading is supported (no writing)
+- **TRR write support** -- TRR writing is supported; XTC writing is not yet implemented
 - **Zig-native error handling** -- Uses Zig's error union types instead of C-style return codes
 - **Allocator-aware** -- All memory allocation goes through a caller-provided `std.mem.Allocator`
 - **Buffered I/O** -- 64KB read buffer via `std.fs.File.Reader`, reducing syscall overhead
