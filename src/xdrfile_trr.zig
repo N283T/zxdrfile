@@ -391,8 +391,11 @@ pub const TrrWriter = struct {
 
         switch (mode) {
             .write => {
-                const file = std.fs.cwd().createFile(path, .{}) catch {
-                    return TrrError.WriteError;
+                const file = std.fs.cwd().createFile(path, .{}) catch |err| {
+                    return switch (err) {
+                        error.FileNotFound => TrrError.FileNotFound,
+                        else => TrrError.WriteError,
+                    };
                 };
                 errdefer file.close();
 
@@ -408,8 +411,11 @@ pub const TrrWriter = struct {
                 };
             },
             .append => {
-                const file = std.fs.cwd().openFile(path, .{ .mode = .read_write }) catch {
-                    return TrrError.FileNotFound;
+                const file = std.fs.cwd().openFile(path, .{ .mode = .read_write }) catch |err| {
+                    return switch (err) {
+                        error.FileNotFound => TrrError.FileNotFound,
+                        else => TrrError.WriteError,
+                    };
                 };
                 errdefer file.close();
 
@@ -452,11 +458,15 @@ pub const TrrWriter = struct {
     }
 
     pub fn close(self: *Self) !void {
-        self.writer.interface.flush() catch return TrrError.WriteError;
+        const flush_result = self.writer.interface.flush();
         self.allocator.destroy(self.write_buf);
         self.file.close();
+        flush_result catch return TrrError.WriteError;
     }
 
+    /// Write a single frame to the TRR file.
+    /// On write error, the file may contain a partially written frame and
+    /// should be considered corrupted.
     pub fn writeFrame(self: *Self, frame: TrrFrame) !void {
         const natoms_u: usize = @intCast(self.natoms);
         const size3 = natoms_u * DIM;
@@ -551,8 +561,18 @@ pub const TrrWriter = struct {
     }
 
     fn writeFloatsBulk(self: *Self, data: []const f32) !void {
-        for (data) |val| {
-            try self.writeFloat(val);
+        const chunk_size = 1024;
+        var tmp: [chunk_size]u32 = undefined;
+        var i: usize = 0;
+        while (i < data.len) {
+            const remaining = data.len - i;
+            const n = if (remaining < chunk_size) remaining else chunk_size;
+            for (0..n) |j| {
+                tmp[j] = std.mem.nativeToBig(u32, @bitCast(data[i + j]));
+            }
+            const bytes: []const u8 = @as([*]const u8, @ptrCast(&tmp))[0 .. n * 4];
+            self.io().writeAll(bytes) catch return TrrError.WriteError;
+            i += n;
         }
     }
 
@@ -1077,4 +1097,62 @@ test "TrrWriter round-trip with frame0.trr" {
     }
 
     try std.testing.expectEqual(@as(usize, 501), frame_count);
+}
+
+test "TrrWriter rejects natoms <= 0" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(TrrError.InvalidAtomCount, TrrWriter.open(allocator, "test_data/tmp_zero.trr", 0, .write));
+    try std.testing.expectError(TrrError.InvalidAtomCount, TrrWriter.open(allocator, "test_data/tmp_neg.trr", -1, .write));
+}
+
+test "TrrWriter rejects has_v=true with null velocities" {
+    const allocator = std.testing.allocator;
+    const tmp_path = "test_data/tmp_write_null_v.trr";
+
+    var writer = try TrrWriter.open(allocator, tmp_path, 1, .write);
+    defer {
+        writer.close() catch {};
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+    }
+
+    const coords = [_]f32{ 1.0, 2.0, 3.0 };
+    const frame = TrrFrame{
+        .step = 0,
+        .time = 0.0,
+        .lambda = 0.0,
+        .box = std.mem.zeroes([3][3]f32),
+        .has_x = true,
+        .has_v = true,
+        .has_f = false,
+        .coords = @constCast(&coords),
+        .velocities = null,
+        .forces = null,
+    };
+    try std.testing.expectError(TrrError.InvalidFrameData, writer.writeFrame(frame));
+}
+
+test "TrrWriter rejects has_f=true with null forces" {
+    const allocator = std.testing.allocator;
+    const tmp_path = "test_data/tmp_write_null_f.trr";
+
+    var writer = try TrrWriter.open(allocator, tmp_path, 1, .write);
+    defer {
+        writer.close() catch {};
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+    }
+
+    const coords = [_]f32{ 1.0, 2.0, 3.0 };
+    const frame = TrrFrame{
+        .step = 0,
+        .time = 0.0,
+        .lambda = 0.0,
+        .box = std.mem.zeroes([3][3]f32),
+        .has_x = true,
+        .has_v = false,
+        .has_f = true,
+        .coords = @constCast(&coords),
+        .velocities = null,
+        .forces = null,
+    };
+    try std.testing.expectError(TrrError.InvalidFrameData, writer.writeFrame(frame));
 }
