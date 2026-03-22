@@ -46,6 +46,9 @@ pub const XtcError = error{
     DecompressionError,
     BufferTooSmall,
     OutOfMemory,
+    WriteError,
+    InvalidAtomCount,
+    CompressionError,
 };
 
 /// XTC file magic number
@@ -80,6 +83,205 @@ pub const XtcFrame = struct {
 };
 
 const READ_BUF_SIZE = 65536;
+
+// ============================================
+// Bit-level encoding/decoding utilities (module scope, shared by reader and writer)
+// ============================================
+
+/// Return the number of bits needed to represent `size` values (0..size-1).
+fn sizeofint(size: u32) u32 {
+    var num: u32 = 1;
+    var num_of_bits: u32 = 0;
+    while (size >= num and num_of_bits < 32) {
+        num_of_bits += 1;
+        num <<= 1;
+    }
+    return num_of_bits;
+}
+
+/// Return the number of bits needed to represent the product of `sizes`.
+fn sizeofints(num_of_ints: usize, sizes: []const u32) u32 {
+    var bytes: [32]u32 = undefined;
+    var num_of_bytes: usize = 1;
+    bytes[0] = 1;
+
+    for (0..num_of_ints) |i| {
+        var tmp: u32 = 0;
+        for (0..num_of_bytes) |bytecnt| {
+            tmp = bytes[bytecnt] * sizes[i] + tmp;
+            bytes[bytecnt] = tmp & 0xff;
+            tmp >>= 8;
+        }
+        while (tmp != 0) {
+            bytes[num_of_bytes] = tmp & 0xff;
+            num_of_bytes += 1;
+            tmp >>= 8;
+        }
+    }
+
+    var num: u32 = 1;
+    var num_of_bits: u32 = 0;
+    num_of_bytes -= 1;
+    while (bytes[num_of_bytes] >= num) {
+        num_of_bits += 1;
+        num *= 2;
+    }
+    return num_of_bits + @as(u32, @intCast(num_of_bytes)) * 8;
+}
+
+/// Decode `num_of_bits` bits from the compressed buffer.
+/// buf[0] = byte counter, buf[1] = lastbits, buf[2] = lastbyte
+fn decodebits(buf: []i32, num_of_bits_arg: u32) i32 {
+    var num_of_bits = num_of_bits_arg;
+    const cbuf: [*]u8 = @ptrCast(@alignCast(buf.ptr + 3));
+
+    var cnt: usize = @intCast(@as(u32, @bitCast(buf[0])));
+    var lastbits: u32 = @bitCast(buf[1]);
+    var lastbyte: u32 = @bitCast(buf[2]);
+
+    const mask: u32 = if (num_of_bits_arg >= 32)
+        0xFFFFFFFF
+    else
+        (@as(u32, 1) << @as(u5, @intCast(num_of_bits_arg))) - 1;
+
+    var num: u32 = 0;
+    while (num_of_bits >= 8) {
+        lastbyte = (lastbyte << 8) | cbuf[cnt];
+        cnt += 1;
+        const shift_r: u5 = @intCast(lastbits & 31);
+        const shift_l: u5 = @intCast((num_of_bits - 8) & 31);
+        num |= (lastbyte >> shift_r) << shift_l;
+        num_of_bits -= 8;
+    }
+    if (num_of_bits > 0) {
+        if (lastbits < num_of_bits) {
+            lastbits += 8;
+            lastbyte = (lastbyte << 8) | cbuf[cnt];
+            cnt += 1;
+        }
+        lastbits -= num_of_bits;
+        const shift: u5 = @intCast(lastbits & 31);
+        const mask_bits: u5 = @intCast(num_of_bits & 31);
+        num |= (lastbyte >> shift) & ((@as(u32, 1) << mask_bits) -% 1);
+    }
+
+    num &= mask;
+    buf[0] = @bitCast(@as(u32, @intCast(cnt)));
+    buf[1] = @bitCast(lastbits);
+    buf[2] = @bitCast(lastbyte);
+    return @bitCast(num);
+}
+
+/// Decode multiple packed integers from the compressed buffer.
+fn decodeints(buf: []i32, num_of_ints: usize, num_of_bits_arg: u32, sizes: []const u32, nums: []i32) void {
+    var bytes: [32]i32 = undefined;
+    bytes[1] = 0;
+    bytes[2] = 0;
+    bytes[3] = 0;
+
+    var num_of_bytes: usize = 0;
+    var num_of_bits = num_of_bits_arg;
+    while (num_of_bits > 8) {
+        bytes[num_of_bytes] = decodebits(buf, 8);
+        num_of_bytes += 1;
+        num_of_bits -= 8;
+    }
+    if (num_of_bits > 0) {
+        bytes[num_of_bytes] = decodebits(buf, num_of_bits);
+        num_of_bytes += 1;
+    }
+
+    var i = num_of_ints - 1;
+    while (i > 0) : (i -= 1) {
+        var num: i32 = 0;
+        var j = num_of_bytes;
+        while (j > 0) {
+            j -= 1;
+            num = (num << 8) | bytes[j];
+            const size_i: i32 = @intCast(sizes[i]);
+            const p = @divTrunc(num, size_i);
+            bytes[j] = p;
+            num = num - p * size_i;
+        }
+        nums[i] = num;
+    }
+    nums[0] = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24);
+}
+
+/// Encode `num` using `num_of_bits` bits into the compressed buffer.
+/// buf[0] = byte counter, buf[1] = lastbits, buf[2] = lastbyte
+fn encodebits(buf: []i32, num_of_bits_arg: u32, num: u32) void {
+    const cbuf: [*]u8 = @ptrCast(@alignCast(buf.ptr + 3));
+
+    var cnt: usize = @intCast(@as(u32, @bitCast(buf[0])));
+    var lastbits: u32 = @bitCast(buf[1]);
+    var lastbyte: u32 = @bitCast(buf[2]);
+
+    var num_of_bits = num_of_bits_arg;
+    while (num_of_bits >= 8) {
+        lastbyte = (lastbyte << 8) | (num >> @intCast(num_of_bits - 8));
+        cbuf[cnt] = @intCast((lastbyte >> @intCast(lastbits & 31)) & 0xff);
+        cnt += 1;
+        num_of_bits -= 8;
+    }
+    if (num_of_bits > 0) {
+        lastbyte = (lastbyte << @intCast(num_of_bits & 31)) | num;
+        lastbits += num_of_bits;
+        if (lastbits >= 8) {
+            lastbits -= 8;
+            cbuf[cnt] = @intCast((lastbyte >> @intCast(lastbits & 31)) & 0xff);
+            cnt += 1;
+        }
+    }
+    buf[0] = @bitCast(@as(u32, @intCast(cnt)));
+    buf[1] = @bitCast(lastbits);
+    buf[2] = @bitCast(lastbyte);
+    if (lastbits > 0) {
+        cbuf[cnt] = @intCast((lastbyte << @intCast((8 - lastbits) & 31)) & 0xff);
+    }
+}
+
+/// Encode multiple integers packed into the compressed buffer.
+fn encodeints(buf: []i32, num_of_ints: usize, num_of_bits: u32, sizes: []const u32, nums: []const u32) void {
+    var bytes: [32]u32 = undefined;
+    var num_of_bytes: usize = 0;
+
+    var tmp: u32 = nums[0];
+    while (true) {
+        bytes[num_of_bytes] = tmp & 0xff;
+        num_of_bytes += 1;
+        tmp >>= 8;
+        if (tmp == 0) break;
+    }
+
+    for (1..num_of_ints) |idx| {
+        tmp = nums[idx];
+        for (0..num_of_bytes) |bytecnt| {
+            tmp = bytes[bytecnt] * sizes[idx] + tmp;
+            bytes[bytecnt] = tmp & 0xff;
+            tmp >>= 8;
+        }
+        var bytecnt = num_of_bytes;
+        while (tmp != 0) {
+            bytes[bytecnt] = tmp & 0xff;
+            bytecnt += 1;
+            tmp >>= 8;
+        }
+        num_of_bytes = bytecnt;
+    }
+
+    if (num_of_bits >= num_of_bytes * 8) {
+        for (0..num_of_bytes) |idx| {
+            encodebits(buf, 8, bytes[idx]);
+        }
+        encodebits(buf, num_of_bits - @as(u32, @intCast(num_of_bytes)) * 8, 0);
+    } else {
+        for (0..num_of_bytes - 1) |idx| {
+            encodebits(buf, 8, bytes[idx]);
+        }
+        encodebits(buf, num_of_bits - @as(u32, @intCast(num_of_bytes - 1)) * 8, bytes[num_of_bytes - 1]);
+    }
+}
 
 /// XTC file reader
 pub const XtcReader = struct {
@@ -231,130 +433,6 @@ pub const XtcReader = struct {
 
     fn readExact(self: *Self, dest: []u8) !void {
         self.io().readSliceAll(dest) catch |err| return mapIoError(err);
-    }
-
-    // ============================================
-    // Bit-level encoding/decoding utilities
-    // ============================================
-
-    /// Return the number of bits needed to represent `size` values (0..size-1).
-    fn sizeofint(size: u32) u32 {
-        var num: u32 = 1;
-        var num_of_bits: u32 = 0;
-        while (size >= num and num_of_bits < 32) {
-            num_of_bits += 1;
-            num <<= 1;
-        }
-        return num_of_bits;
-    }
-
-    /// Return the number of bits needed to represent the product of `sizes`.
-    fn sizeofints(num_of_ints: usize, sizes: []const u32) u32 {
-        var bytes: [32]u32 = undefined;
-        var num_of_bytes: usize = 1;
-        bytes[0] = 1;
-
-        for (0..num_of_ints) |i| {
-            var tmp: u32 = 0;
-            for (0..num_of_bytes) |bytecnt| {
-                tmp = bytes[bytecnt] * sizes[i] + tmp;
-                bytes[bytecnt] = tmp & 0xff;
-                tmp >>= 8;
-            }
-            while (tmp != 0) {
-                bytes[num_of_bytes] = tmp & 0xff;
-                num_of_bytes += 1;
-                tmp >>= 8;
-            }
-        }
-
-        var num: u32 = 1;
-        var num_of_bits: u32 = 0;
-        num_of_bytes -= 1;
-        while (bytes[num_of_bytes] >= num) {
-            num_of_bits += 1;
-            num *= 2;
-        }
-        return num_of_bits + @as(u32, @intCast(num_of_bytes)) * 8;
-    }
-
-    /// Decode `num_of_bits` bits from the compressed buffer.
-    /// buf[0] = byte counter, buf[1] = lastbits, buf[2] = lastbyte
-    fn decodebits(buf: []i32, num_of_bits_arg: u32) i32 {
-        var num_of_bits = num_of_bits_arg;
-        const cbuf: [*]u8 = @ptrCast(@alignCast(buf.ptr + 3));
-
-        var cnt: usize = @intCast(@as(u32, @bitCast(buf[0])));
-        var lastbits: u32 = @bitCast(buf[1]);
-        var lastbyte: u32 = @bitCast(buf[2]);
-
-        const mask: u32 = if (num_of_bits_arg >= 32)
-            0xFFFFFFFF
-        else
-            (@as(u32, 1) << @as(u5, @intCast(num_of_bits_arg))) - 1;
-
-        var num: u32 = 0;
-        while (num_of_bits >= 8) {
-            lastbyte = (lastbyte << 8) | cbuf[cnt];
-            cnt += 1;
-            const shift_r: u5 = @intCast(lastbits & 31);
-            const shift_l: u5 = @intCast((num_of_bits - 8) & 31);
-            num |= (lastbyte >> shift_r) << shift_l;
-            num_of_bits -= 8;
-        }
-        if (num_of_bits > 0) {
-            if (lastbits < num_of_bits) {
-                lastbits += 8;
-                lastbyte = (lastbyte << 8) | cbuf[cnt];
-                cnt += 1;
-            }
-            lastbits -= num_of_bits;
-            const shift: u5 = @intCast(lastbits & 31);
-            const mask_bits: u5 = @intCast(num_of_bits & 31);
-            num |= (lastbyte >> shift) & ((@as(u32, 1) << mask_bits) -% 1);
-        }
-
-        num &= mask;
-        buf[0] = @bitCast(@as(u32, @intCast(cnt)));
-        buf[1] = @bitCast(lastbits);
-        buf[2] = @bitCast(lastbyte);
-        return @bitCast(num);
-    }
-
-    /// Decode multiple packed integers from the compressed buffer.
-    fn decodeints(buf: []i32, num_of_ints: usize, num_of_bits_arg: u32, sizes: []const u32, nums: []i32) void {
-        var bytes: [32]i32 = undefined;
-        bytes[1] = 0;
-        bytes[2] = 0;
-        bytes[3] = 0;
-
-        var num_of_bytes: usize = 0;
-        var num_of_bits = num_of_bits_arg;
-        while (num_of_bits > 8) {
-            bytes[num_of_bytes] = decodebits(buf, 8);
-            num_of_bytes += 1;
-            num_of_bits -= 8;
-        }
-        if (num_of_bits > 0) {
-            bytes[num_of_bytes] = decodebits(buf, num_of_bits);
-            num_of_bytes += 1;
-        }
-
-        var i = num_of_ints - 1;
-        while (i > 0) : (i -= 1) {
-            var num: i32 = 0;
-            var j = num_of_bytes;
-            while (j > 0) {
-                j -= 1;
-                num = (num << 8) | bytes[j];
-                const size_i: i32 = @intCast(sizes[i]);
-                const p = @divTrunc(num, size_i);
-                bytes[j] = p;
-                num = num - p * size_i;
-            }
-            nums[i] = num;
-        }
-        nums[0] = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24);
     }
 
     // ============================================
@@ -566,22 +644,450 @@ pub const XtcReader = struct {
 };
 
 // ============================================
+// XTC Writer
+// ============================================
+
+const WRITE_BUF_SIZE = 65536;
+
+/// XTC file writer (single-precision with coordinate compression)
+pub const XtcWriter = struct {
+    file: std.fs.File,
+    writer: std.fs.File.Writer,
+    write_buf: *[WRITE_BUF_SIZE]u8,
+    allocator: Allocator,
+    natoms: i32,
+    // buf1: integer coordinate buffer (size3 elements)
+    // buf2: compressed bitstream with 3-element header + payload
+    buf1: []i32,
+    buf2: []i32,
+
+    const Self = @This();
+
+    pub const Mode = enum { write, append };
+
+    pub fn open(allocator: Allocator, path: []const u8, natoms: i32, mode: Mode) !Self {
+        if (natoms <= 0) return XtcError.InvalidAtomCount;
+
+        const natoms_u: usize = @intCast(natoms);
+        const size3 = natoms_u * 3;
+
+        // Allocate compression buffers
+        const buf1 = allocator.alloc(i32, size3) catch return XtcError.OutOfMemory;
+        errdefer allocator.free(buf1);
+
+        // buf2: size3 * 1.2 + 3 for worst-case compression plus 3-element header
+        const buf2_size = @as(usize, @intFromFloat(@as(f64, @floatFromInt(size3)) * 1.2)) + 3;
+        const buf2 = allocator.alloc(i32, buf2_size) catch return XtcError.OutOfMemory;
+        errdefer allocator.free(buf2);
+
+        switch (mode) {
+            .write => {
+                const file = std.fs.cwd().createFile(path, .{}) catch |err| {
+                    return switch (err) {
+                        error.FileNotFound => XtcError.FileNotFound,
+                        else => XtcError.WriteError,
+                    };
+                };
+                errdefer file.close();
+
+                const write_buf = allocator.create([WRITE_BUF_SIZE]u8) catch return XtcError.OutOfMemory;
+                errdefer allocator.destroy(write_buf);
+
+                return Self{
+                    .file = file,
+                    .writer = file.writer(write_buf),
+                    .write_buf = write_buf,
+                    .allocator = allocator,
+                    .natoms = natoms,
+                    .buf1 = buf1,
+                    .buf2 = buf2,
+                };
+            },
+            .append => {
+                const file = std.fs.cwd().openFile(path, .{ .mode = .read_write }) catch |err| {
+                    return switch (err) {
+                        error.FileNotFound => XtcError.FileNotFound,
+                        else => XtcError.WriteError,
+                    };
+                };
+                errdefer file.close();
+
+                const write_buf = allocator.create([WRITE_BUF_SIZE]u8) catch return XtcError.OutOfMemory;
+                errdefer allocator.destroy(write_buf);
+
+                // Validate natoms from existing file, then seek to end
+                const file_size = file.getEndPos() catch return XtcError.ReadError;
+                if (file_size > 0) {
+                    const read_buf = allocator.create([READ_BUF_SIZE]u8) catch return XtcError.OutOfMemory;
+                    defer allocator.destroy(read_buf);
+
+                    var temp_reader = file.reader(read_buf);
+                    const magic_buf = temp_reader.interface.takeArray(4) catch return XtcError.ReadError;
+                    const magic: i32 = @bitCast(std.mem.readInt(u32, magic_buf, .big));
+                    if (magic != XTC_MAGIC) return XtcError.InvalidMagic;
+
+                    const natoms_buf = temp_reader.interface.takeArray(4) catch return XtcError.ReadError;
+                    const file_natoms: i32 = @bitCast(std.mem.readInt(u32, natoms_buf, .big));
+                    if (file_natoms != natoms) return XtcError.InvalidAtomCount;
+                }
+
+                // Use positional writer: set pos to end of file so writes append
+                var w = file.writer(write_buf);
+                w.pos = file_size;
+
+                return Self{
+                    .file = file,
+                    .writer = w,
+                    .write_buf = write_buf,
+                    .allocator = allocator,
+                    .natoms = natoms,
+                    .buf1 = buf1,
+                    .buf2 = buf2,
+                };
+            },
+        }
+    }
+
+    /// Flush, release all resources, and close the file.
+    /// Resources are always freed even if flush fails.
+    pub fn close(self: *Self) !void {
+        const flush_result = self.writer.interface.flush();
+        self.allocator.free(self.buf1);
+        self.allocator.free(self.buf2);
+        self.allocator.destroy(self.write_buf);
+        self.file.close();
+        flush_result catch return XtcError.WriteError;
+    }
+
+    /// Write a single frame to the XTC file.
+    /// On write error, the file may contain a partially written frame.
+    pub fn writeFrame(self: *Self, frame: XtcFrame) !void {
+        const natoms_u: usize = @intCast(self.natoms);
+        if (frame.coords.len != natoms_u * 3) return XtcError.CompressionError;
+
+        // Write header: magic, natoms, step, time
+        try self.writeInt(XTC_MAGIC);
+        try self.writeInt(self.natoms);
+        try self.writeInt(frame.step);
+        try self.writeFloat(frame.time);
+
+        // Write box (3x3 matrix)
+        for (0..3) |i| {
+            for (0..3) |j| {
+                try self.writeFloat(frame.box[i][j]);
+            }
+        }
+
+        // Write compressed coordinates
+        try self.compressCoords(frame.coords, frame.precision);
+    }
+
+    // ============================================
+    // Coordinate compression
+    // ============================================
+
+    /// Compress and write 3D coordinates using the XTC algorithm.
+    /// Ported from xdrfile_compress_coord_float() in xdrfile.c.
+    fn compressCoords(self: *Self, coords: []const f32, precision_arg: f32) !void {
+        const lsize: i32 = self.natoms;
+        const lsize_u: usize = @intCast(lsize);
+        const size3 = lsize_u * 3;
+
+        // Write number of atoms
+        try self.writeInt(lsize);
+
+        // For 9 atoms or fewer, write raw floats (no compression)
+        if (lsize <= 9) {
+            for (0..size3) |i| {
+                try self.writeFloat(coords[i]);
+            }
+            return;
+        }
+
+        // Clamp precision
+        const precision: f32 = if (precision_arg <= 0) 1000.0 else precision_arg;
+        try self.writeFloat(precision);
+
+        const buf1 = self.buf1;
+        const buf2 = self.buf2;
+        buf2[0] = 0;
+        buf2[1] = 0;
+        buf2[2] = 0;
+
+        // Phase 1: Quantize floats to integers, find min/max per dimension
+        var minint: [3]i32 = .{ std.math.maxInt(i32), std.math.maxInt(i32), std.math.maxInt(i32) };
+        var maxint: [3]i32 = .{ std.math.minInt(i32), std.math.minInt(i32), std.math.minInt(i32) };
+        var mindiff: i32 = std.math.maxInt(i32);
+        var oldlint: [3]i32 = .{ 0, 0, 0 };
+
+        var lip: usize = 0;
+        var lfp: usize = 0;
+        while (lfp < size3) {
+            var lint: [3]i32 = undefined;
+            for (0..3) |d| {
+                const lf: f32 = if (coords[lfp + d] >= 0.0)
+                    coords[lfp + d] * precision + 0.5
+                else
+                    coords[lfp + d] * precision - 0.5;
+                lint[d] = @intFromFloat(lf);
+                if (lint[d] < minint[d]) minint[d] = lint[d];
+                if (lint[d] > maxint[d]) maxint[d] = lint[d];
+                buf1[lip + d] = lint[d];
+            }
+            // Track min inter-atom distance (from second atom onwards)
+            if (lfp >= 3) {
+                const diff: i32 = @as(i32, @intCast(@abs(oldlint[0] - lint[0]))) +
+                    @as(i32, @intCast(@abs(oldlint[1] - lint[1]))) +
+                    @as(i32, @intCast(@abs(oldlint[2] - lint[2])));
+                if (diff < mindiff) mindiff = diff;
+            }
+            oldlint = lint;
+            lip += 3;
+            lfp += 3;
+        }
+
+        // Write minint, maxint
+        for (0..3) |d| try self.writeInt(minint[d]);
+        for (0..3) |d| try self.writeInt(maxint[d]);
+
+        // Phase 2: Compute sizeint, bitsize
+        var sizeint: [3]u32 = undefined;
+        sizeint[0] = @intCast(maxint[0] - minint[0] + 1);
+        sizeint[1] = @intCast(maxint[1] - minint[1] + 1);
+        sizeint[2] = @intCast(maxint[2] - minint[2] + 1);
+
+        var bitsizeint: [3]u32 = .{ 0, 0, 0 };
+        var bitsize: u32 = 0;
+        if ((sizeint[0] | sizeint[1] | sizeint[2]) > 0xffffff) {
+            bitsizeint[0] = sizeofint(sizeint[0]);
+            bitsizeint[1] = sizeofint(sizeint[1]);
+            bitsizeint[2] = sizeofint(sizeint[2]);
+            bitsize = 0; // flag: use per-dimension sizes
+        } else {
+            bitsize = sizeofints(3, &sizeint);
+        }
+
+        // Phase 3: Find smallidx such that magicints[smallidx] >= mindiff
+        var smallidx: i32 = @intCast(FIRSTIDX);
+        while (smallidx < @as(i32, @intCast(LASTIDX)) and magicints[@intCast(smallidx)] < @as(u32, @intCast(@max(0, mindiff)))) {
+            smallidx += 1;
+        }
+        try self.writeInt(smallidx);
+
+        const tmp_maxidx: i32 = smallidx + 8;
+        const maxidx: usize = if (LASTIDX < @as(usize, @intCast(tmp_maxidx))) LASTIDX else @intCast(tmp_maxidx);
+        const minidx: usize = maxidx - 8;
+
+        var tmp_smaller: i32 = smallidx - 1;
+        if (tmp_smaller < @as(i32, @intCast(FIRSTIDX))) tmp_smaller = @intCast(FIRSTIDX);
+        var smaller: i32 = @intCast(magicints[@intCast(tmp_smaller)] / 2);
+        var smallnum: i32 = @intCast(magicints[@intCast(smallidx)] / 2);
+        var sizesmall: [3]u32 = .{
+            magicints[@intCast(smallidx)],
+            magicints[@intCast(smallidx)],
+            magicints[@intCast(smallidx)],
+        };
+        var larger: i32 = @intCast(magicints[maxidx] / 2);
+
+        // Phase 4: Main compression loop
+        var i: usize = 0;
+        var prevrun: i32 = -1;
+        var prevcoord: [3]i32 = .{ 0, 0, 0 };
+
+        while (i < lsize_u) {
+            const thiscoord = buf1[i * 3 ..][0..3];
+
+            // Determine is_smaller: can we shrink the smallidx?
+            var is_smaller: i32 = 0;
+            if (smallidx < @as(i32, @intCast(maxidx)) and i >= 1 and
+                @abs(thiscoord[0] - prevcoord[0]) < larger and
+                @abs(thiscoord[1] - prevcoord[1]) < larger and
+                @abs(thiscoord[2] - prevcoord[2]) < larger)
+            {
+                is_smaller = 1;
+            } else if (smallidx > @as(i32, @intCast(minidx))) {
+                is_smaller = -1;
+            }
+
+            // Check is_small: next atom within smallnum delta (water molecule optimization)
+            var is_small: i32 = 0;
+            if (i + 1 < lsize_u) {
+                const nextcoord = buf1[(i + 1) * 3 ..][0..3];
+                if (@abs(thiscoord[0] - nextcoord[0]) < smallnum and
+                    @abs(thiscoord[1] - nextcoord[1]) < smallnum and
+                    @abs(thiscoord[2] - nextcoord[2]) < smallnum)
+                {
+                    // Swap first and second atom for better water compression
+                    const t0 = thiscoord[0];
+                    thiscoord[0] = nextcoord[0];
+                    nextcoord[0] = t0;
+                    const t1 = thiscoord[1];
+                    thiscoord[1] = nextcoord[1];
+                    nextcoord[1] = t1;
+                    const t2 = thiscoord[2];
+                    thiscoord[2] = nextcoord[2];
+                    nextcoord[2] = t2;
+                    is_small = 1;
+                }
+            }
+
+            // Encode absolute coordinate (relative to minint)
+            var tmpcoord: [30]u32 = undefined;
+            tmpcoord[0] = @intCast(thiscoord[0] - minint[0]);
+            tmpcoord[1] = @intCast(thiscoord[1] - minint[1]);
+            tmpcoord[2] = @intCast(thiscoord[2] - minint[2]);
+            if (bitsize == 0) {
+                encodebits(buf2, bitsizeint[0], tmpcoord[0]);
+                encodebits(buf2, bitsizeint[1], tmpcoord[1]);
+                encodebits(buf2, bitsizeint[2], tmpcoord[2]);
+            } else {
+                encodeints(buf2, 3, bitsize, &sizeint, tmpcoord[0..3]);
+            }
+
+            prevcoord[0] = thiscoord[0];
+            prevcoord[1] = thiscoord[1];
+            prevcoord[2] = thiscoord[2];
+            i += 1;
+
+            // Build run of "small" delta-encoded atoms
+            var run: i32 = 0;
+            if (is_small == 0 and is_smaller == -1) {
+                is_smaller = 0;
+            }
+            while (is_small != 0 and run < 8 * 3) {
+                const rc = buf1[i * 3 ..][0..3];
+
+                // Check if we should stop shrinking
+                if (is_smaller == -1) {
+                    const tmpsum: i32 = blk: {
+                        var s: i32 = 0;
+                        for (0..3) |d| {
+                            const dt = rc[d] - prevcoord[d];
+                            s += dt * dt;
+                        }
+                        break :blk s;
+                    };
+                    if (tmpsum >= smaller * smaller) {
+                        is_smaller = 0;
+                    }
+                }
+
+                // Encode delta relative to prevcoord + smallnum offset
+                const run_idx: usize = @intCast(run);
+                tmpcoord[run_idx] = @intCast(rc[0] - prevcoord[0] + smallnum);
+                tmpcoord[run_idx + 1] = @intCast(rc[1] - prevcoord[1] + smallnum);
+                tmpcoord[run_idx + 2] = @intCast(rc[2] - prevcoord[2] + smallnum);
+
+                prevcoord[0] = rc[0];
+                prevcoord[1] = rc[1];
+                prevcoord[2] = rc[2];
+
+                run += 3;
+                i += 1;
+
+                // Check if next atom is also small
+                is_small = 0;
+                if (i < lsize_u) {
+                    const nc = buf1[i * 3 ..][0..3];
+                    if (@abs(nc[0] - prevcoord[0]) < smallnum and
+                        @abs(nc[1] - prevcoord[1]) < smallnum and
+                        @abs(nc[2] - prevcoord[2]) < smallnum)
+                    {
+                        is_small = 1;
+                    }
+                }
+            }
+
+            // Encode run metadata: 1 flag bit + optional 5-bit run+is_smaller+1
+            if (run != prevrun or is_smaller != 0) {
+                prevrun = run;
+                encodebits(buf2, 1, 1); // flag: run changed
+                encodebits(buf2, 5, @intCast(run + is_smaller + 1));
+            } else {
+                encodebits(buf2, 1, 0); // flag: run unchanged
+            }
+
+            // Encode run delta coords
+            var k: usize = 0;
+            while (k < @as(usize, @intCast(run))) : (k += 3) {
+                encodeints(buf2, 3, @intCast(smallidx), &sizesmall, tmpcoord[k..][0..3]);
+            }
+
+            // Adjust smallidx
+            if (is_smaller != 0) {
+                smallidx += is_smaller;
+                if (is_smaller < 0) {
+                    smallnum = smaller;
+                    smaller = @intCast(magicints[@intCast(smallidx - 1)] / 2);
+                } else {
+                    smaller = smallnum;
+                    smallnum = @intCast(magicints[@intCast(smallidx)] / 2);
+                }
+                sizesmall[0] = magicints[@intCast(smallidx)];
+                sizesmall[1] = magicints[@intCast(smallidx)];
+                sizesmall[2] = magicints[@intCast(smallidx)];
+                larger = @intCast(magicints[maxidx] / 2);
+            }
+        }
+
+        // Flush: if there are pending bits, round up byte count
+        if (buf2[1] != 0) {
+            buf2[0] += 1;
+        }
+
+        // Write compressed data length (bytes) and payload
+        try self.writeInt(buf2[0]);
+        const data_len_u: usize = @intCast(buf2[0]);
+        const cbuf: [*]const u8 = @ptrCast(@alignCast(buf2.ptr + 3));
+        try self.writeOpaque(cbuf[0..data_len_u]);
+    }
+
+    // ============================================
+    // Internal I/O
+    // ============================================
+
+    inline fn io(self: *Self) *std.Io.Writer {
+        return &self.writer.interface;
+    }
+
+    fn writeInt(self: *Self, value: i32) !void {
+        const bytes = std.mem.toBytes(std.mem.nativeToBig(u32, @bitCast(value)));
+        self.io().writeAll(&bytes) catch return XtcError.WriteError;
+    }
+
+    fn writeFloat(self: *Self, value: f32) !void {
+        const bytes = std.mem.toBytes(std.mem.nativeToBig(u32, @bitCast(value)));
+        self.io().writeAll(&bytes) catch return XtcError.WriteError;
+    }
+
+    fn writeOpaque(self: *Self, data: []const u8) !void {
+        self.io().writeAll(data) catch return XtcError.WriteError;
+        // XDR opaque data must be padded to 4-byte boundary
+        const pad = (4 - (data.len % 4)) % 4;
+        if (pad > 0) {
+            const zeros = [_]u8{0} ** 4;
+            self.io().writeAll(zeros[0..pad]) catch return XtcError.WriteError;
+        }
+    }
+};
+
+// ============================================
 // Tests
 // ============================================
 
 test "sizeofint" {
-    try std.testing.expectEqual(@as(u32, 0), XtcReader.sizeofint(0));
-    try std.testing.expectEqual(@as(u32, 1), XtcReader.sizeofint(1));
-    try std.testing.expectEqual(@as(u32, 8), XtcReader.sizeofint(255));
-    try std.testing.expectEqual(@as(u32, 9), XtcReader.sizeofint(256));
+    try std.testing.expectEqual(@as(u32, 0), sizeofint(0));
+    try std.testing.expectEqual(@as(u32, 1), sizeofint(1));
+    try std.testing.expectEqual(@as(u32, 8), sizeofint(255));
+    try std.testing.expectEqual(@as(u32, 9), sizeofint(256));
 }
 
 test "sizeofints" {
     const sizes1 = [_]u32{ 21801, 21008, 15514 };
-    try std.testing.expectEqual(@as(u32, 43), XtcReader.sizeofints(3, &sizes1));
+    try std.testing.expectEqual(@as(u32, 43), sizeofints(3, &sizes1));
 
     const sizes2 = [_]u32{ 2048, 2048, 2048 };
-    try std.testing.expectEqual(@as(u32, 34), XtcReader.sizeofints(3, &sizes2));
+    try std.testing.expectEqual(@as(u32, 34), sizeofints(3, &sizes2));
 }
 
 test "magicints table" {
@@ -735,4 +1241,96 @@ test "read very large xtc (5ltj 511MB)" {
     }
 
     try std.testing.expectEqual(@as(usize, 10001), frame_count);
+}
+
+test "XtcWriter round-trip: 3 atoms (small path, no compression)" {
+    const allocator = std.testing.allocator;
+    const tmp_path = "test_data/tmp_xtc_write_3.xtc";
+
+    {
+        var writer = try XtcWriter.open(allocator, tmp_path, 3, .write);
+        defer writer.close() catch {};
+
+        var coords = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0 };
+        const frame = XtcFrame{
+            .step = 42,
+            .time = 10.5,
+            .box = [3][3]f32{
+                .{ 2.0, 0.0, 0.0 },
+                .{ 0.0, 3.0, 0.0 },
+                .{ 0.0, 0.0, 4.0 },
+            },
+            .coords = &coords,
+            .precision = 1000.0,
+        };
+        try writer.writeFrame(frame);
+    }
+
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    var reader = try XtcReader.open(allocator, tmp_path);
+    defer reader.close();
+
+    try std.testing.expectEqual(@as(i32, 3), reader.getNumAtoms());
+
+    var frame = try reader.readFrame();
+    defer frame.deinit(allocator);
+
+    try std.testing.expectEqual(@as(i32, 42), frame.step);
+    try std.testing.expectApproxEqAbs(@as(f32, 10.5), frame.time, 0.001);
+    // Small path writes raw floats, so exact match is expected
+    const tolerance: f32 = 0.002;
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), frame.coords[0], tolerance);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), frame.coords[1], tolerance);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), frame.coords[2], tolerance);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), frame.coords[4], tolerance);
+    try std.testing.expectApproxEqAbs(@as(f32, 9.0), frame.coords[8], tolerance);
+}
+
+test "XtcWriter round-trip: 20 atoms (full compression path)" {
+    const allocator = std.testing.allocator;
+    const tmp_path = "test_data/tmp_xtc_write_20.xtc";
+
+    const natoms = 20;
+    var src_coords: [natoms * 3]f32 = undefined;
+    for (0..natoms) |a| {
+        src_coords[a * 3 + 0] = @as(f32, @floatFromInt(a)) * 0.35 + 0.1;
+        src_coords[a * 3 + 1] = @as(f32, @floatFromInt(a)) * 0.12 - 0.5;
+        src_coords[a * 3 + 2] = @as(f32, @floatFromInt(a)) * 0.27 + 0.3;
+    }
+
+    {
+        var writer = try XtcWriter.open(allocator, tmp_path, natoms, .write);
+        defer writer.close() catch {};
+
+        const frame = XtcFrame{
+            .step = 1,
+            .time = 0.0,
+            .box = [3][3]f32{
+                .{ 5.0, 0.0, 0.0 },
+                .{ 0.0, 5.0, 0.0 },
+                .{ 0.0, 0.0, 5.0 },
+            },
+            .coords = &src_coords,
+            .precision = 1000.0,
+        };
+        try writer.writeFrame(frame);
+    }
+
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    var reader = try XtcReader.open(allocator, tmp_path);
+    defer reader.close();
+
+    try std.testing.expectEqual(@as(i32, natoms), reader.getNumAtoms());
+
+    var frame = try reader.readFrame();
+    defer frame.deinit(allocator);
+
+    try std.testing.expectEqual(@as(i32, 1), frame.step);
+    // XTC is lossy — tolerance based on precision=1000 (1/1000 nm = 0.001 nm)
+    const tolerance: f32 = 0.002;
+    for (0..natoms * 3) |k| {
+        try std.testing.expectApproxEqAbs(src_coords[k], frame.coords[k], tolerance);
+    }
 }
