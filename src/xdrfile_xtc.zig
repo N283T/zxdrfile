@@ -1334,3 +1334,286 @@ test "XtcWriter round-trip: 20 atoms (full compression path)" {
         try std.testing.expectApproxEqAbs(src_coords[k], frame.coords[k], tolerance);
     }
 }
+
+test "XtcWriter multi-frame: write 5 frames, verify step and coord values" {
+    const allocator = std.testing.allocator;
+    const tmp_path = "test_data/tmp_xtc_multiframe.xtc";
+
+    const natoms = 20;
+    const num_frames = 5;
+
+    // Build source data: each frame has distinct step/time/coords
+    var src_coords: [num_frames][natoms * 3]f32 = undefined;
+    for (0..num_frames) |f| {
+        for (0..natoms) |a| {
+            src_coords[f][a * 3 + 0] = @as(f32, @floatFromInt(f * natoms + a)) * 0.1 + 0.05;
+            src_coords[f][a * 3 + 1] = @as(f32, @floatFromInt(f * natoms + a)) * 0.15 - 0.3;
+            src_coords[f][a * 3 + 2] = @as(f32, @floatFromInt(f * natoms + a)) * 0.08 + 0.2;
+        }
+    }
+
+    {
+        var writer = try XtcWriter.open(allocator, tmp_path, natoms, .write);
+        defer writer.close() catch {};
+
+        for (0..num_frames) |f| {
+            const frame = XtcFrame{
+                .step = @intCast(f * 100 + 10),
+                .time = @as(f32, @floatFromInt(f)) * 2.5,
+                .box = [3][3]f32{
+                    .{ 4.0, 0.0, 0.0 },
+                    .{ 0.0, 4.0, 0.0 },
+                    .{ 0.0, 0.0, 4.0 },
+                },
+                .coords = &src_coords[f],
+                .precision = 1000.0,
+            };
+            try writer.writeFrame(frame);
+        }
+    }
+
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    var reader = try XtcReader.open(allocator, tmp_path);
+    defer reader.close();
+
+    try std.testing.expectEqual(@as(i32, natoms), reader.getNumAtoms());
+
+    // Read back all 5 frames and verify step, time, and a sample coordinate
+    const tolerance: f32 = 0.002;
+    for (0..num_frames) |f| {
+        var frame = try reader.readFrame();
+        defer frame.deinit(allocator);
+
+        try std.testing.expectEqual(@as(i32, @intCast(f * 100 + 10)), frame.step);
+        try std.testing.expectApproxEqAbs(@as(f32, @floatFromInt(f)) * 2.5, frame.time, 0.001);
+        try std.testing.expectEqual(@as(usize, natoms * 3), frame.coords.len);
+        // Check first and last coordinates of each frame
+        try std.testing.expectApproxEqAbs(src_coords[f][0], frame.coords[0], tolerance);
+        try std.testing.expectApproxEqAbs(src_coords[f][natoms * 3 - 1], frame.coords[natoms * 3 - 1], tolerance);
+    }
+
+    // Verify EOF on the next read
+    const eof_err = reader.readFrame();
+    try std.testing.expectError(XtcError.EndOfFile, eof_err);
+}
+
+test "XtcWriter append mode: write 2 then append 3, read all 5" {
+    const allocator = std.testing.allocator;
+    const tmp_path = "test_data/tmp_xtc_append.xtc";
+
+    const natoms = 20;
+
+    var src_coords: [5][natoms * 3]f32 = undefined;
+    for (0..5) |f| {
+        for (0..natoms * 3) |k| {
+            src_coords[f][k] = @as(f32, @floatFromInt(f * 10 + k)) * 0.01 + 0.1;
+        }
+    }
+
+    // Write first 2 frames
+    {
+        var writer = try XtcWriter.open(allocator, tmp_path, natoms, .write);
+        defer writer.close() catch {};
+
+        for (0..2) |f| {
+            const frame = XtcFrame{
+                .step = @intCast(f + 1),
+                .time = @as(f32, @floatFromInt(f)) * 1.0,
+                .box = [3][3]f32{
+                    .{ 3.0, 0.0, 0.0 },
+                    .{ 0.0, 3.0, 0.0 },
+                    .{ 0.0, 0.0, 3.0 },
+                },
+                .coords = &src_coords[f],
+                .precision = 1000.0,
+            };
+            try writer.writeFrame(frame);
+        }
+    }
+
+    // Append 3 more frames
+    {
+        var writer = try XtcWriter.open(allocator, tmp_path, natoms, .append);
+        defer writer.close() catch {};
+
+        for (2..5) |f| {
+            const frame = XtcFrame{
+                .step = @intCast(f + 1),
+                .time = @as(f32, @floatFromInt(f)) * 1.0,
+                .box = [3][3]f32{
+                    .{ 3.0, 0.0, 0.0 },
+                    .{ 0.0, 3.0, 0.0 },
+                    .{ 0.0, 0.0, 3.0 },
+                },
+                .coords = &src_coords[f],
+                .precision = 1000.0,
+            };
+            try writer.writeFrame(frame);
+        }
+    }
+
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    var reader = try XtcReader.open(allocator, tmp_path);
+    defer reader.close();
+
+    try std.testing.expectEqual(@as(i32, natoms), reader.getNumAtoms());
+
+    // All 5 frames must be readable with correct step numbers
+    const tolerance: f32 = 0.002;
+    for (0..5) |f| {
+        var frame = try reader.readFrame();
+        defer frame.deinit(allocator);
+
+        try std.testing.expectEqual(@as(i32, @intCast(f + 1)), frame.step);
+        try std.testing.expectApproxEqAbs(@as(f32, @floatFromInt(f)) * 1.0, frame.time, 0.001);
+        try std.testing.expectApproxEqAbs(src_coords[f][0], frame.coords[0], tolerance);
+    }
+
+    const eof_err = reader.readFrame();
+    try std.testing.expectError(XtcError.EndOfFile, eof_err);
+}
+
+test "XtcWriter round-trip with 1l2y.xtc (304 atoms, all 38 frames)" {
+    const allocator = std.testing.allocator;
+    const src_path = "test_data/1l2y.xtc";
+    const tmp_path = "test_data/tmp_xtc_roundtrip_1l2y.xtc";
+
+    // 1l2y.xtc has exactly 38 frames; read and store them all
+    const expected_frames = 38;
+    var src_frames: [expected_frames]XtcFrame = undefined;
+    var src_frame_count: usize = 0;
+
+    {
+        var src_reader = try XtcReader.open(allocator, src_path);
+        defer src_reader.close();
+
+        const natoms = src_reader.getNumAtoms();
+        try std.testing.expectEqual(@as(i32, 304), natoms);
+
+        while (src_frame_count < expected_frames) {
+            const frame = src_reader.readFrame() catch |err| {
+                if (err == XtcError.EndOfFile) break;
+                return err;
+            };
+            src_frames[src_frame_count] = frame;
+            src_frame_count += 1;
+        }
+    }
+
+    defer {
+        for (0..src_frame_count) |i| src_frames[i].deinit(allocator);
+    }
+
+    try std.testing.expectEqual(expected_frames, src_frame_count);
+
+    // Determine tolerance from the precision of the first frame (XTC is lossy)
+    const precision = src_frames[0].precision;
+    const tolerance: f32 = 1.0 / precision + 0.0005;
+
+    // Write all frames to a temporary file
+    {
+        var writer = try XtcWriter.open(allocator, tmp_path, @as(i32, 304), .write);
+        defer writer.close() catch {};
+
+        for (0..src_frame_count) |i| {
+            try writer.writeFrame(src_frames[i]);
+        }
+    }
+
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    // Read back and compare every frame coordinate-by-coordinate
+    var dst_reader = try XtcReader.open(allocator, tmp_path);
+    defer dst_reader.close();
+
+    try std.testing.expectEqual(@as(i32, 304), dst_reader.getNumAtoms());
+
+    for (0..src_frame_count) |i| {
+        const src_frame = src_frames[i];
+        var dst_frame = try dst_reader.readFrame();
+        defer dst_frame.deinit(allocator);
+
+        try std.testing.expectEqual(src_frame.step, dst_frame.step);
+        try std.testing.expectApproxEqAbs(src_frame.time, dst_frame.time, 0.001);
+        try std.testing.expectEqual(src_frame.coords.len, dst_frame.coords.len);
+
+        for (src_frame.coords, dst_frame.coords) |src_c, dst_c| {
+            try std.testing.expectApproxEqAbs(src_c, dst_c, tolerance);
+        }
+    }
+
+    const eof_err = dst_reader.readFrame();
+    try std.testing.expectError(XtcError.EndOfFile, eof_err);
+}
+
+test "XtcWriter error paths" {
+    const allocator = std.testing.allocator;
+
+    // natoms <= 0 must return InvalidAtomCount
+    {
+        const result = XtcWriter.open(allocator, "test_data/tmp_xtc_err_zero.xtc", 0, .write);
+        try std.testing.expectError(XtcError.InvalidAtomCount, result);
+
+        const result_neg = XtcWriter.open(allocator, "test_data/tmp_xtc_err_neg.xtc", -5, .write);
+        try std.testing.expectError(XtcError.InvalidAtomCount, result_neg);
+    }
+
+    // coords length mismatch must return CompressionError
+    {
+        const tmp_path = "test_data/tmp_xtc_err_coords.xtc";
+
+        var writer = try XtcWriter.open(allocator, tmp_path, 20, .write);
+        defer writer.close() catch {};
+        defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+        // Provide only 3 coords instead of 60
+        var short_coords = [_]f32{ 1.0, 2.0, 3.0 };
+        const bad_frame = XtcFrame{
+            .step = 1,
+            .time = 0.0,
+            .box = [3][3]f32{
+                .{ 5.0, 0.0, 0.0 },
+                .{ 0.0, 5.0, 0.0 },
+                .{ 0.0, 0.0, 5.0 },
+            },
+            .coords = &short_coords,
+            .precision = 1000.0,
+        };
+        const write_result = writer.writeFrame(bad_frame);
+        try std.testing.expectError(XtcError.CompressionError, write_result);
+    }
+
+    // Append with mismatched natoms must return InvalidAtomCount
+    {
+        const tmp_path = "test_data/tmp_xtc_err_natoms_mismatch.xtc";
+
+        // Create file with natoms=20
+        {
+            var writer = try XtcWriter.open(allocator, tmp_path, 20, .write);
+            defer writer.close() catch {};
+
+            var coords: [20 * 3]f32 = undefined;
+            for (0..20 * 3) |k| coords[k] = @as(f32, @floatFromInt(k)) * 0.1;
+            const frame = XtcFrame{
+                .step = 1,
+                .time = 0.0,
+                .box = [3][3]f32{
+                    .{ 5.0, 0.0, 0.0 },
+                    .{ 0.0, 5.0, 0.0 },
+                    .{ 0.0, 0.0, 5.0 },
+                },
+                .coords = &coords,
+                .precision = 1000.0,
+            };
+            try writer.writeFrame(frame);
+        }
+
+        defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+        // Try to append with natoms=10 (mismatch — file has 20)
+        const append_result = XtcWriter.open(allocator, tmp_path, 10, .append);
+        try std.testing.expectError(XtcError.InvalidAtomCount, append_result);
+    }
+}
