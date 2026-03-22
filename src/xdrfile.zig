@@ -1,8 +1,8 @@
 // zxdrfile - XDR trajectory file library for Zig
 //
-// Provides readers for GROMACS trajectory formats:
-// - XTC: Compressed coordinate trajectories
-// - TRR: Full-precision trajectories (coordinates, velocities, forces)
+// Provides readers and writers for GROMACS trajectory formats:
+// - XTC: Compressed coordinate trajectories (read only)
+// - TRR: Full-precision trajectories (read and write)
 //
 // Based on the xdrfile implementation from mdtraj:
 // https://github.com/mdtraj/mdtraj/tree/master/mdtraj/formats/xtc
@@ -43,6 +43,7 @@ pub const XtcFrame = xtc.XtcFrame;
 pub const XtcError = xtc.XtcError;
 
 pub const TrrReader = trr.TrrReader;
+pub const TrrWriter = trr.TrrWriter;
 pub const TrrFrame = trr.TrrFrame;
 pub const TrrError = trr.TrrError;
 
