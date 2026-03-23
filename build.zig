@@ -26,7 +26,8 @@ pub fn build(b: *std.Build) void {
     const run_validation = b.addRunArtifact(validation_tests);
     const validate_step = b.step("validate", "Run validation tests against mdtraj reference");
     validate_step.dependOn(&run_validation.step);
-    test_step.dependOn(&run_validation.step);
+    // Not included in `zig build test` to avoid tmp file conflicts
+    // from parallel test binaries. Run separately with `zig build validate`.
 
     // Cross-format conversion tests
     const cross_format_mod = b.addModule("cross_format_test", .{
