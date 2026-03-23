@@ -10,7 +10,7 @@ A Zig library for reading and writing GROMACS XDR trajectory files (XTC and TRR 
 
 ## Features
 
-- **XTC reader** -- Compressed trajectory format with 3D coordinate decompression
+- **XTC reader/writer** -- Compressed trajectory format with 3D coordinate compression/decompression
 - **TRR reader/writer** -- Uncompressed trajectory format with coordinates, velocities, and forces
 - **High performance** -- Buffered I/O with bulk reads and in-place byte-swapping
 - **Zero dependencies** -- Pure Zig, no C bindings required
@@ -103,6 +103,27 @@ To append to an existing file, use `.append` mode:
 var writer = try xdrfile.TrrWriter.open(allocator, "existing.trr", natoms, .append);
 ```
 
+### Writing XTC
+
+```zig
+const xdrfile = @import("zxdrfile");
+
+var writer = try xdrfile.XtcWriter.open(allocator, "output.xtc", natoms, .write);
+defer writer.close() catch {};
+
+const frame = xdrfile.XtcFrame{
+    .step = 0,
+    .time = 0.0,
+    .box = box,
+    .coords = coords,
+    .precision = 1000.0,
+};
+try writer.writeFrame(frame);
+```
+
+> **Note:** XTC uses lossy compression. The `precision` parameter controls the trade-off
+> between file size and coordinate accuracy (1000.0 gives ~0.001 nm accuracy).
+
 ## Building
 
 ```bash
@@ -123,7 +144,7 @@ zig build bench     # Run benchmarks (ReleaseFast)
 
 This is not a line-by-line translation. Key differences:
 
-- **TRR write support** -- TRR writing is supported; XTC writing is not yet implemented
+- **Full read/write support** -- Both XTC and TRR formats support reading and writing
 - **Zig-native error handling** -- Uses Zig's error union types instead of C-style return codes
 - **Allocator-aware** -- All memory allocation goes through a caller-provided `std.mem.Allocator`
 - **Buffered I/O** -- 64KB read buffer via `std.fs.File.Reader`, reducing syscall overhead
