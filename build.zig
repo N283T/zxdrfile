@@ -28,6 +28,19 @@ pub fn build(b: *std.Build) void {
     validate_step.dependOn(&run_validation.step);
     test_step.dependOn(&run_validation.step);
 
+    // Cross-format conversion tests
+    const cross_format_mod = b.addModule("cross_format_test", .{
+        .root_source_file = b.path("src/cross_format_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const cross_format_tests = b.addTest(.{ .root_module = cross_format_mod });
+    const run_cross_format = b.addRunArtifact(cross_format_tests);
+    const cross_format_step = b.step("cross-format", "Run cross-format conversion tests");
+    cross_format_step.dependOn(&run_cross_format.step);
+    // Not included in `zig build test` to avoid tmp file conflicts
+    // from parallel test binaries. Run separately with `zig build cross-format`.
+
     // Documentation
     const lib = b.addLibrary(.{
         .name = "zxdrfile",
@@ -40,6 +53,18 @@ pub fn build(b: *std.Build) void {
     });
     const docs_step = b.step("docs", "Generate documentation");
     docs_step.dependOn(&install_docs.step);
+
+    // Converter tool (for cross-validation with mdtraj)
+    const converter_mod = b.addModule("converter", .{
+        .root_source_file = b.path("src/converter.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const converter_exe = b.addExecutable(.{
+        .name = "converter",
+        .root_module = converter_mod,
+    });
+    b.installArtifact(converter_exe);
 
     // Benchmark (always ReleaseFast for meaningful results)
     const bench_mod = b.addModule("benchmark", .{
