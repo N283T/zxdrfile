@@ -219,13 +219,14 @@ fn encodebits(buf: []i32, num_of_bits_arg: u32, num: u32) void {
 
     var num_of_bits = num_of_bits_arg;
     while (num_of_bits >= 8) {
-        lastbyte = (lastbyte << 8) | (num >> @intCast(num_of_bits - 8));
+        lastbyte = (lastbyte << 8) | ((num >> @intCast(num_of_bits - 8)) & 0xff);
         cbuf[cnt] = @intCast((lastbyte >> @intCast(lastbits & 31)) & 0xff);
         cnt += 1;
         num_of_bits -= 8;
     }
     if (num_of_bits > 0) {
-        lastbyte = (lastbyte << @intCast(num_of_bits & 31)) | num;
+        const tail_mask = (@as(u32, 1) << @intCast(num_of_bits & 31)) - 1;
+        lastbyte = (lastbyte << @intCast(num_of_bits & 31)) | (num & tail_mask);
         lastbits += num_of_bits;
         if (lastbits >= 8) {
             lastbits -= 8;
@@ -669,14 +670,14 @@ pub const XtcWriter = struct {
         if (natoms <= 0) return XtcError.InvalidAtomCount;
 
         const natoms_u: usize = @intCast(natoms);
-        const size3 = natoms_u * 3;
+        const size3 = std.math.mul(usize, natoms_u, 3) catch return XtcError.InvalidAtomCount;
 
         // Allocate compression buffers
         const buf1 = allocator.alloc(i32, size3) catch return XtcError.OutOfMemory;
         errdefer allocator.free(buf1);
 
         // buf2: size3 * 1.2 + 3 for worst-case compression plus 3-element header
-        const buf2_size = @as(usize, @intFromFloat(@as(f64, @floatFromInt(size3)) * 1.2)) + 3;
+        const buf2_size: usize = size3 + size3 / 5 + 3;
         const buf2 = allocator.alloc(i32, buf2_size) catch return XtcError.OutOfMemory;
         errdefer allocator.free(buf2);
 
@@ -804,8 +805,9 @@ pub const XtcWriter = struct {
             return;
         }
 
-        // Clamp precision
-        const precision: f32 = if (precision_arg <= 0) 1000.0 else precision_arg;
+        // Validate precision
+        if (precision_arg <= 0) return XtcError.CompressionError;
+        const precision: f32 = precision_arg;
         try self.writeFloat(precision);
 
         const buf1 = self.buf1;
@@ -872,10 +874,11 @@ pub const XtcWriter = struct {
         while (smallidx < @as(i32, @intCast(LASTIDX)) and magicints[@intCast(smallidx)] < @as(u32, @intCast(@max(0, mindiff)))) {
             smallidx += 1;
         }
+        if (smallidx >= @as(i32, @intCast(LASTIDX))) return XtcError.CompressionError;
         try self.writeInt(smallidx);
 
         const tmp_maxidx: i32 = smallidx + 8;
-        const maxidx: usize = if (LASTIDX < @as(usize, @intCast(tmp_maxidx))) LASTIDX else @intCast(tmp_maxidx);
+        const maxidx: usize = if (LASTIDX - 1 < @as(usize, @intCast(tmp_maxidx))) LASTIDX - 1 else @intCast(tmp_maxidx);
         const minidx: usize = maxidx - 8;
 
         var tmp_smaller: i32 = smallidx - 1;
