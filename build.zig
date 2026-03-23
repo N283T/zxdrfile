@@ -38,7 +38,8 @@ pub fn build(b: *std.Build) void {
     const run_cross_format = b.addRunArtifact(cross_format_tests);
     const cross_format_step = b.step("cross-format", "Run cross-format conversion tests");
     cross_format_step.dependOn(&run_cross_format.step);
-    test_step.dependOn(&run_cross_format.step);
+    // Not included in `zig build test` to avoid tmp file conflicts
+    // from parallel test binaries. Run separately with `zig build cross-format`.
 
     // Documentation
     const lib = b.addLibrary(.{
