@@ -519,11 +519,13 @@ pub const TrrWriter = struct {
 
         // Write box matrix
         if (box_is_nonzero) {
+            var box_flat: [DIM * DIM]f32 = undefined;
             for (0..DIM) |i| {
                 for (0..DIM) |j| {
-                    try self.writeFloat(frame.box[i][j]);
+                    box_flat[i * DIM + j] = frame.box[i][j];
                 }
             }
+            try self.writeFloatsBulk(&box_flat);
         }
 
         // Write coordinates
@@ -543,77 +545,93 @@ pub const TrrWriter = struct {
     }
 
     // ============================================
-    // Internal I/O
+    // Internal I/O (optimized for throughput)
     // ============================================
 
     inline fn io(self: *Self) *std.Io.Writer {
         return &self.writer.interface;
     }
 
-    fn writeInt(self: *Self, value: i32) !void {
-        const bytes = std.mem.toBytes(std.mem.nativeToBig(u32, @bitCast(value)));
-        self.io().writeAll(&bytes) catch return TrrError.WriteError;
+    fn writeRaw(self: *Self, bytes: []const u8) !void {
+        self.io().writeAll(bytes) catch return TrrError.WriteError;
     }
 
-    fn writeFloat(self: *Self, value: f32) !void {
-        const bytes = std.mem.toBytes(std.mem.nativeToBig(u32, @bitCast(value)));
-        self.io().writeAll(&bytes) catch return TrrError.WriteError;
-    }
-
+    /// Write an entire float array in one bulk operation.
+    /// Uses a large stack buffer for byte-swapping to minimize write calls.
     fn writeFloatsBulk(self: *Self, data: []const f32) !void {
-        const chunk_size = 1024;
-        var tmp: [chunk_size]u32 = undefined;
-        var i: usize = 0;
-        while (i < data.len) {
-            const remaining = data.len - i;
-            const n = if (remaining < chunk_size) remaining else chunk_size;
-            for (0..n) |j| {
-                tmp[j] = std.mem.nativeToBig(u32, @bitCast(data[i + j]));
+        if (native_endian == .big) {
+            const bytes: []const u8 = @as([*]const u8, @ptrCast(data.ptr))[0 .. data.len * 4];
+            try self.writeRaw(bytes);
+        } else {
+            // 16KB stack buffer = 4096 floats per chunk
+            const chunk_size = 4096;
+            var tmp: [chunk_size]u32 = undefined;
+            var i: usize = 0;
+            while (i < data.len) {
+                const remaining = data.len - i;
+                const n = if (remaining < chunk_size) remaining else chunk_size;
+                const src: [*]const u32 = @ptrCast(data.ptr + i);
+                for (0..n) |j| {
+                    tmp[j] = @byteSwap(src[j]);
+                }
+                const bytes: []const u8 = @as([*]const u8, @ptrCast(&tmp))[0 .. n * 4];
+                try self.writeRaw(bytes);
+                i += n;
             }
-            const bytes: []const u8 = @as([*]const u8, @ptrCast(&tmp))[0 .. n * 4];
-            self.io().writeAll(bytes) catch return TrrError.WriteError;
-            i += n;
         }
     }
 
+    /// Write the entire TRR frame header as a single buffer write.
     fn writeHeader(self: *Self, header: TrrHeader) !void {
-        // Magic number
-        try self.writeInt(TRR_MAGIC);
+        // Pack header into a contiguous buffer:
+        // magic(4) + slen(4) + xdr_string_len(4) + "GMX_trn_file"(12) +
+        // 10 size fields(40) + natoms(4) + step(4) + nre(4) + time(4) + lambda(4) = 84 bytes
+        const version_padded_len = ((VERSION_STRING.len + 3) / 4) * 4;
+        // 3 prefix ints + version string + 13 ints (sizes+natoms+step+nre) + 2 floats (time+lambda)
+        const header_size = 3 * 4 + version_padded_len + 15 * 4;
+        var buf: [header_size]u8 = undefined;
+        var pos: usize = 0;
 
-        // Version string length (including null terminator)
-        const slen: i32 = @intCast(VERSION_STRING.len + 1);
-        try self.writeInt(slen);
-
-        // XDR string encoding: 4-byte length + data padded to 4-byte boundary
-        try self.writeInt(@intCast(VERSION_STRING.len));
-        self.io().writeAll(VERSION_STRING) catch return TrrError.WriteError;
-        // Pad to 4-byte boundary
-        const pad_len = ((VERSION_STRING.len + 3) / 4) * 4 - VERSION_STRING.len;
-        if (pad_len > 0) {
-            const padding = [_]u8{0} ** 4;
-            self.io().writeAll(padding[0..pad_len]) catch return TrrError.WriteError;
+        inline for (.{
+            TRR_MAGIC,
+            @as(i32, @intCast(VERSION_STRING.len + 1)),
+            @as(i32, @intCast(VERSION_STRING.len)),
+        }) |val| {
+            @as(*align(1) [4]u8, @ptrCast(buf[pos..][0..4])).* =
+                std.mem.toBytes(std.mem.nativeToBig(u32, @bitCast(val)));
+            pos += 4;
         }
 
-        // Size fields
-        try self.writeInt(header.ir_size);
-        try self.writeInt(header.e_size);
-        try self.writeInt(header.box_size);
-        try self.writeInt(header.vir_size);
-        try self.writeInt(header.pres_size);
-        try self.writeInt(header.top_size);
-        try self.writeInt(header.sym_size);
-        try self.writeInt(header.x_size);
-        try self.writeInt(header.v_size);
-        try self.writeInt(header.f_size);
-        try self.writeInt(header.natoms);
+        // Version string + padding
+        @memcpy(buf[pos..][0..VERSION_STRING.len], VERSION_STRING);
+        pos += VERSION_STRING.len;
+        const pad = version_padded_len - VERSION_STRING.len;
+        if (pad > 0) {
+            @memset(buf[pos..][0..pad], 0);
+            pos += pad;
+        }
 
-        // Step and nre
-        try self.writeInt(header.step);
-        try self.writeInt(header.nre);
+        // 10 size fields + natoms + step + nre + time + lambda
+        inline for (.{
+            header.ir_size,  header.e_size,   header.box_size,
+            header.vir_size, header.pres_size, header.top_size,
+            header.sym_size, header.x_size,   header.v_size,
+            header.f_size,   header.natoms,   header.step,
+            header.nre,
+        }) |val| {
+            @as(*align(1) [4]u8, @ptrCast(buf[pos..][0..4])).* =
+                std.mem.toBytes(std.mem.nativeToBig(u32, @bitCast(val)));
+            pos += 4;
+        }
+        // time and lambda as floats
+        @as(*align(1) [4]u8, @ptrCast(buf[pos..][0..4])).* =
+            std.mem.toBytes(std.mem.nativeToBig(u32, @bitCast(header.time)));
+        pos += 4;
+        @as(*align(1) [4]u8, @ptrCast(buf[pos..][0..4])).* =
+            std.mem.toBytes(std.mem.nativeToBig(u32, @bitCast(header.lambda)));
+        pos += 4;
 
-        // Time and lambda (single precision)
-        try self.writeFloat(header.time);
-        try self.writeFloat(header.lambda);
+        try self.writeRaw(buf[0..pos]);
     }
 };
 
