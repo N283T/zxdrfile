@@ -4,20 +4,21 @@
 [![CI](https://github.com/N283T/zxdrfile/actions/workflows/ci.yml/badge.svg)](https://github.com/N283T/zxdrfile/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-BSD_2--Clause-blue.svg)](LICENSE)
 
-A Zig library for reading and writing GROMACS XDR trajectory files (XTC and TRR formats).
+A high-performance Zig library for reading and writing GROMACS XDR trajectory files (XTC and TRR formats).
 
 [**API Documentation**](https://n283t.github.io/zxdrfile/)
 
 ## Features
 
-- **XTC reader/writer** -- Compressed trajectory format with 3D coordinate compression/decompression
-- **TRR reader/writer** -- Uncompressed trajectory format with coordinates, velocities, and forces
-- **High performance** -- Buffered I/O with bulk reads and in-place byte-swapping
-- **Zero dependencies** -- Pure Zig, no C bindings required
+- **XTC reader/writer** -- Compressed coordinate trajectories with lossy 3D compression
+- **TRR reader/writer** -- Full-precision trajectories with coordinates, velocities, and forces
+- **High performance** -- Buffered I/O, bulk byte-swapping, batched header writes
+- **Zero dependencies** -- Pure Zig implementation, no C bindings required
+- **Append mode** -- Append frames to existing trajectory files with natoms validation
 
-## Usage
+## Installation
 
-Add as a Zig package dependency in your `build.zig.zon`:
+Add as a dependency in your `build.zig.zon`:
 
 ```zon
 .dependencies = .{
@@ -35,11 +36,14 @@ const zxdrfile = b.dependency("zxdrfile", .{ .target = target, .optimize = optim
 mod.addImport("zxdrfile", zxdrfile.module("zxdrfile"));
 ```
 
-### Reading XTC
+## Quick Start
+
+### Reading
 
 ```zig
 const xdrfile = @import("zxdrfile");
 
+// XTC
 var reader = try xdrfile.XtcReader.open(allocator, "trajectory.xtc");
 defer reader.close();
 
@@ -49,16 +53,10 @@ while (true) {
         return err;
     };
     defer frame.deinit(allocator);
-
     // frame.step, frame.time, frame.box, frame.coords, frame.precision
 }
-```
 
-### Reading TRR
-
-```zig
-const xdrfile = @import("zxdrfile");
-
+// TRR
 var reader = try xdrfile.TrrReader.open(allocator, "trajectory.trr");
 defer reader.close();
 
@@ -68,21 +66,33 @@ while (true) {
         return err;
     };
     defer frame.deinit(allocator);
-
     // frame.step, frame.time, frame.lambda, frame.box
-    // frame.coords, frame.velocities, frame.forces (optional, nullable)
+    // frame.coords, frame.velocities, frame.forces (optional)
 }
 ```
 
-### Writing TRR
+### Writing
 
 ```zig
 const xdrfile = @import("zxdrfile");
 
+// XTC (lossy compression — precision controls accuracy)
+var writer = try xdrfile.XtcWriter.open(allocator, "output.xtc", natoms, .write);
+defer writer.close() catch {};
+
+try writer.writeFrame(.{
+    .step = 0,
+    .time = 0.0,
+    .box = box,
+    .coords = coords,
+    .precision = 1000.0, // ~0.001 nm accuracy
+});
+
+// TRR (lossless)
 var writer = try xdrfile.TrrWriter.open(allocator, "output.trr", natoms, .write);
 defer writer.close() catch {};
 
-const frame = xdrfile.TrrFrame{
+try writer.writeFrame(.{
     .step = 0,
     .time = 0.0,
     .lambda = 0.0,
@@ -93,43 +103,19 @@ const frame = xdrfile.TrrFrame{
     .coords = coords,
     .velocities = null,
     .forces = null,
-};
-try writer.writeFrame(frame);
-```
+});
 
-To append to an existing file, use `.append` mode:
-
-```zig
+// Append to existing file
 var writer = try xdrfile.TrrWriter.open(allocator, "existing.trr", natoms, .append);
 ```
-
-### Writing XTC
-
-```zig
-const xdrfile = @import("zxdrfile");
-
-var writer = try xdrfile.XtcWriter.open(allocator, "output.xtc", natoms, .write);
-defer writer.close() catch {};
-
-const frame = xdrfile.XtcFrame{
-    .step = 0,
-    .time = 0.0,
-    .box = box,
-    .coords = coords,
-    .precision = 1000.0,
-};
-try writer.writeFrame(frame);
-```
-
-> **Note:** XTC uses lossy compression. The `precision` parameter controls the trade-off
-> between file size and coordinate accuracy (1000.0 gives ~0.001 nm accuracy).
 
 ## Building
 
 ```bash
-zig build test      # Run unit tests + validation tests
-zig build validate  # Run validation tests only (against mdtraj reference)
-zig build bench     # Run benchmarks (ReleaseFast)
+zig build test         # Run unit tests
+zig build validate     # Run validation tests (against mdtraj reference)
+zig build cross-format # Run cross-format conversion tests
+zig build bench        # Run benchmarks (ReleaseFast)
 ```
 
 ## Requirements
@@ -139,18 +125,6 @@ zig build bench     # Run benchmarks (ReleaseFast)
 > **Note:** Zig has not yet reached 1.0 and its standard library API changes
 > frequently between versions. This library may not compile on versions other
 > than the one specified above. Check the CI status badge for current compatibility.
-
-## Differences from the Original C Library
-
-This is not a line-by-line translation. Key differences:
-
-- **Full read/write support** -- Both XTC and TRR formats support reading and writing
-- **Zig-native error handling** -- Uses Zig's error union types instead of C-style return codes
-- **Allocator-aware** -- All memory allocation goes through a caller-provided `std.mem.Allocator`
-- **Buffered I/O** -- 64KB read buffer via `std.fs.File.Reader`, reducing syscall overhead
-- **Bulk reads with in-place byte-swap** -- TRR vectors are read in a single call and byte-swapped in place, instead of one-element-at-a-time XDR decoding
-- **Overflow-safe arithmetic** -- Uses `std.math.mul` for bounds checking on atom count calculations
-- **Bounds checks on smallidx** -- Validates compression index against `FIRSTIDX`/`LASTIDX` to prevent out-of-bounds access
 
 ## Performance
 
@@ -165,7 +139,7 @@ C reference uses the original xdrfile library from mdtraj, compiled with `-O2`.
 | 5wvo_C | 3,858 | 1,001 | 17 MB | 261 MB/s | 246 MB/s | 1.1x |
 | 6sup_A | 33,377 | 1,001 | 148 MB | 321 MB/s | 284 MB/s | 1.1x |
 
-XTC performance is comparable to C. The decompression algorithm dominates runtime,
+XTC performance is comparable to C. The compression algorithm dominates runtime,
 so I/O optimizations have limited impact.
 
 ### TRR (uncompressed)
@@ -178,6 +152,19 @@ so I/O optimizations have limited impact.
 
 TRR is dramatically faster because the C library decodes each 4-byte value individually
 via XDR function calls, while zxdrfile reads entire vectors in bulk and byte-swaps in place.
+
+## Differences from the Original C Library
+
+This is not a line-by-line translation. Key differences:
+
+- **Full read/write support** -- Both XTC and TRR formats support reading and writing
+- **Zig-native error handling** -- Uses Zig's error union types instead of C-style return codes
+- **Allocator-aware** -- All memory allocation goes through a caller-provided `std.mem.Allocator`
+- **Buffered I/O** -- 64KB buffer for both reads and writes, reducing syscall overhead
+- **Bulk byte-swapping** -- Reads/writes entire vectors at once with in-place byte-swap
+- **Batched header writes** -- TRR header packed into a single buffer write
+- **Overflow-safe arithmetic** -- Uses `std.math.mul` for bounds checking on atom count calculations
+- **Compression bounds checks** -- Validates `smallidx` against `FIRSTIDX`/`LASTIDX` to prevent out-of-bounds access
 
 ## Acknowledgments
 
