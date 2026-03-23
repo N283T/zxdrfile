@@ -1248,7 +1248,7 @@ test "read very large xtc (5ltj 511MB)" {
 
 test "XtcWriter round-trip: 3 atoms (small path, no compression)" {
     const allocator = std.testing.allocator;
-    const tmp_path = "test_data/tmp_xtc_write_3.xtc";
+    const tmp_path = "test_data/xtc_tmp_xtc_write_3.xtc";
 
     {
         var writer = try XtcWriter.open(allocator, tmp_path, 3, .write);
@@ -1292,7 +1292,7 @@ test "XtcWriter round-trip: 3 atoms (small path, no compression)" {
 
 test "XtcWriter round-trip: 20 atoms (full compression path)" {
     const allocator = std.testing.allocator;
-    const tmp_path = "test_data/tmp_xtc_write_20.xtc";
+    const tmp_path = "test_data/xtc_tmp_xtc_write_20.xtc";
 
     const natoms = 20;
     var src_coords: [natoms * 3]f32 = undefined;
@@ -1340,7 +1340,7 @@ test "XtcWriter round-trip: 20 atoms (full compression path)" {
 
 test "XtcWriter multi-frame: write 5 frames, verify step and coord values" {
     const allocator = std.testing.allocator;
-    const tmp_path = "test_data/tmp_xtc_multiframe.xtc";
+    const tmp_path = "test_data/xtc_tmp_xtc_multiframe.xtc";
 
     const natoms = 20;
     const num_frames = 5;
@@ -1403,7 +1403,7 @@ test "XtcWriter multi-frame: write 5 frames, verify step and coord values" {
 
 test "XtcWriter append mode: write 2 then append 3, read all 5" {
     const allocator = std.testing.allocator;
-    const tmp_path = "test_data/tmp_xtc_append.xtc";
+    const tmp_path = "test_data/xtc_tmp_xtc_append.xtc";
 
     const natoms = 20;
 
@@ -1481,7 +1481,7 @@ test "XtcWriter append mode: write 2 then append 3, read all 5" {
 test "XtcWriter round-trip with 1l2y.xtc (304 atoms, all 38 frames)" {
     const allocator = std.testing.allocator;
     const src_path = "test_data/1l2y.xtc";
-    const tmp_path = "test_data/tmp_xtc_roundtrip_1l2y.xtc";
+    const tmp_path = "test_data/xtc_tmp_xtc_roundtrip_1l2y.xtc";
 
     // 1l2y.xtc has exactly 38 frames; read and store them all
     const expected_frames = 38;
@@ -1556,16 +1556,16 @@ test "XtcWriter error paths" {
 
     // natoms <= 0 must return InvalidAtomCount
     {
-        const result = XtcWriter.open(allocator, "test_data/tmp_xtc_err_zero.xtc", 0, .write);
+        const result = XtcWriter.open(allocator, "test_data/xtc_tmp_xtc_err_zero.xtc", 0, .write);
         try std.testing.expectError(XtcError.InvalidAtomCount, result);
 
-        const result_neg = XtcWriter.open(allocator, "test_data/tmp_xtc_err_neg.xtc", -5, .write);
+        const result_neg = XtcWriter.open(allocator, "test_data/xtc_tmp_xtc_err_neg.xtc", -5, .write);
         try std.testing.expectError(XtcError.InvalidAtomCount, result_neg);
     }
 
     // coords length mismatch must return CompressionError
     {
-        const tmp_path = "test_data/tmp_xtc_err_coords.xtc";
+        const tmp_path = "test_data/xtc_tmp_xtc_err_coords.xtc";
 
         var writer = try XtcWriter.open(allocator, tmp_path, 20, .write);
         defer writer.close() catch {};
@@ -1590,7 +1590,7 @@ test "XtcWriter error paths" {
 
     // Append with mismatched natoms must return InvalidAtomCount
     {
-        const tmp_path = "test_data/tmp_xtc_err_natoms_mismatch.xtc";
+        const tmp_path = "test_data/xtc_tmp_xtc_err_natoms_mismatch.xtc";
 
         // Create file with natoms=20
         {

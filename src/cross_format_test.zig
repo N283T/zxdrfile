@@ -21,7 +21,7 @@ const TrrError = xdrfile.TrrError;
 
 test "TRR → XTC → read back" {
     const allocator = std.testing.allocator;
-    const xtc_path = "test_data/tmp_trr_to_xtc.xtc";
+    const xtc_path = "test_data/xfmt_tmp_trr_to_xtc.xtc";
 
     // Read TRR and write as XTC
     const precision: f32 = 1000.0;
@@ -98,7 +98,7 @@ test "TRR → XTC → read back" {
 
 test "XTC → TRR → read back" {
     const allocator = std.testing.allocator;
-    const trr_path = "test_data/tmp_xtc_to_trr.trr";
+    const trr_path = "test_data/xfmt_tmp_xtc_to_trr.trr";
 
     // Read XTC and write as TRR
     var natoms: i32 = 0;
@@ -177,8 +177,8 @@ test "XTC → TRR → read back" {
 
 test "TRR → XTC → TRR round-trip" {
     const allocator = std.testing.allocator;
-    const xtc_path = "test_data/tmp_roundtrip_xtc.xtc";
-    const trr_path = "test_data/tmp_roundtrip_trr.trr";
+    const xtc_path = "test_data/xfmt_tmp_roundtrip_xtc.xtc";
+    const trr_path = "test_data/xfmt_tmp_roundtrip_trr.trr";
     const precision: f32 = 1000.0;
 
     var natoms: i32 = 0;

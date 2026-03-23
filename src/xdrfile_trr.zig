@@ -735,7 +735,7 @@ test "read frame0.trr last frame" {
 
 test "TrrWriter write and read back single frame" {
     const allocator = std.testing.allocator;
-    const tmp_path = "test_data/tmp_write_test.trr";
+    const tmp_path = "test_data/trr_tmp_write_test.trr";
 
     // Write a frame
     {
@@ -789,7 +789,7 @@ test "TrrWriter write and read back single frame" {
 
 test "TrrWriter write frame with x, v, f" {
     const allocator = std.testing.allocator;
-    const tmp_path = "test_data/tmp_write_xvf.trr";
+    const tmp_path = "test_data/trr_tmp_write_xvf.trr";
 
     {
         var writer = try TrrWriter.open(allocator, tmp_path, 2, .write);
@@ -831,7 +831,7 @@ test "TrrWriter write frame with x, v, f" {
 
 test "TrrWriter write multiple frames" {
     const allocator = std.testing.allocator;
-    const tmp_path = "test_data/tmp_write_multi.trr";
+    const tmp_path = "test_data/trr_tmp_write_multi.trr";
 
     {
         var writer = try TrrWriter.open(allocator, tmp_path, 2, .write);
@@ -878,7 +878,7 @@ test "TrrWriter write multiple frames" {
 
 test "TrrWriter append mode" {
     const allocator = std.testing.allocator;
-    const tmp_path = "test_data/tmp_write_append.trr";
+    const tmp_path = "test_data/trr_tmp_write_append.trr";
 
     // Write 2 frames
     {
@@ -947,7 +947,7 @@ test "TrrWriter append mode" {
 
 test "TrrWriter rejects mismatched array length" {
     const allocator = std.testing.allocator;
-    const tmp_path = "test_data/tmp_write_err.trr";
+    const tmp_path = "test_data/trr_tmp_write_err.trr";
 
     var writer = try TrrWriter.open(allocator, tmp_path, 2, .write);
     defer {
@@ -974,7 +974,7 @@ test "TrrWriter rejects mismatched array length" {
 
 test "TrrWriter rejects has_x=true with null coords" {
     const allocator = std.testing.allocator;
-    const tmp_path = "test_data/tmp_write_null.trr";
+    const tmp_path = "test_data/trr_tmp_write_null.trr";
 
     var writer = try TrrWriter.open(allocator, tmp_path, 1, .write);
     defer {
@@ -999,7 +999,7 @@ test "TrrWriter rejects has_x=true with null coords" {
 
 test "TrrWriter append rejects natoms mismatch" {
     const allocator = std.testing.allocator;
-    const tmp_path = "test_data/tmp_write_natoms.trr";
+    const tmp_path = "test_data/trr_tmp_write_natoms.trr";
 
     // Write with natoms=2
     {
@@ -1029,7 +1029,7 @@ test "TrrWriter append rejects natoms mismatch" {
 
 test "TrrWriter round-trip with frame0.trr" {
     const allocator = std.testing.allocator;
-    const tmp_path = "test_data/tmp_roundtrip.trr";
+    const tmp_path = "test_data/trr_tmp_roundtrip.trr";
 
     // Read original and write all frames to new file
     {
@@ -1047,28 +1047,13 @@ test "TrrWriter round-trip with frame0.trr" {
                 return err;
             };
             defer frame.deinit(allocator);
-            // Write coords only (frame0.trr may be double precision;
-            // writing v/f as single precision changes header sizes,
-            // which breaks the is_double detection on read-back)
-            const coords_only = TrrFrame{
-                .step = frame.step,
-                .time = frame.time,
-                .lambda = frame.lambda,
-                .box = frame.box,
-                .has_x = frame.has_x,
-                .has_v = false,
-                .has_f = false,
-                .coords = frame.coords,
-                .velocities = null,
-                .forces = null,
-            };
-            try writer.writeFrame(coords_only);
+            try writer.writeFrame(frame);
         }
     }
 
     defer std.fs.cwd().deleteFile(tmp_path) catch {};
 
-    // Read back and compare coordinates with original
+    // Read back and compare with original
     var reader_orig = try TrrReader.open(allocator, "test_data/frame0.trr");
     defer reader_orig.close();
 
@@ -1097,11 +1082,25 @@ test "TrrWriter round-trip with frame0.trr" {
         try std.testing.expectEqual(orig.step, copy.step);
         try std.testing.expectApproxEqAbs(orig.time, copy.time, tolerance);
         try std.testing.expectApproxEqAbs(orig.lambda, copy.lambda, tolerance);
-        try std.testing.expect(copy.has_x);
+        try std.testing.expectEqual(orig.has_x, copy.has_x);
+        try std.testing.expectEqual(orig.has_v, copy.has_v);
+        try std.testing.expectEqual(orig.has_f, copy.has_f);
 
         if (orig.coords) |oc| {
             const cc = copy.coords.?;
             for (oc, cc) |o, c| {
+                try std.testing.expectApproxEqAbs(o, c, tolerance);
+            }
+        }
+        if (orig.velocities) |ov| {
+            const cv = copy.velocities.?;
+            for (ov, cv) |o, c| {
+                try std.testing.expectApproxEqAbs(o, c, tolerance);
+            }
+        }
+        if (orig.forces) |of| {
+            const cf = copy.forces.?;
+            for (of, cf) |o, c| {
                 try std.testing.expectApproxEqAbs(o, c, tolerance);
             }
         }
@@ -1114,13 +1113,13 @@ test "TrrWriter round-trip with frame0.trr" {
 
 test "TrrWriter rejects natoms <= 0" {
     const allocator = std.testing.allocator;
-    try std.testing.expectError(TrrError.InvalidAtomCount, TrrWriter.open(allocator, "test_data/tmp_zero.trr", 0, .write));
-    try std.testing.expectError(TrrError.InvalidAtomCount, TrrWriter.open(allocator, "test_data/tmp_neg.trr", -1, .write));
+    try std.testing.expectError(TrrError.InvalidAtomCount, TrrWriter.open(allocator, "test_data/trr_tmp_zero.trr", 0, .write));
+    try std.testing.expectError(TrrError.InvalidAtomCount, TrrWriter.open(allocator, "test_data/trr_tmp_neg.trr", -1, .write));
 }
 
 test "TrrWriter rejects has_v=true with null velocities" {
     const allocator = std.testing.allocator;
-    const tmp_path = "test_data/tmp_write_null_v.trr";
+    const tmp_path = "test_data/trr_tmp_write_null_v.trr";
 
     var writer = try TrrWriter.open(allocator, tmp_path, 1, .write);
     defer {
@@ -1146,7 +1145,7 @@ test "TrrWriter rejects has_v=true with null velocities" {
 
 test "TrrWriter rejects has_f=true with null forces" {
     const allocator = std.testing.allocator;
-    const tmp_path = "test_data/tmp_write_null_f.trr";
+    const tmp_path = "test_data/trr_tmp_write_null_f.trr";
 
     var writer = try TrrWriter.open(allocator, tmp_path, 1, .write);
     defer {
