@@ -128,7 +128,7 @@ pub const TrrReader = struct {
         const header = try self.readHeader();
         self.natoms = header.natoms;
 
-        // Reset to beginning
+        // Rewind: we consumed the first header just to learn natoms; replay from byte 0.
         self.reader.seekTo(0) catch return TrrError.ReadError;
 
         return self;

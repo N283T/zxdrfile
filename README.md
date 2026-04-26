@@ -46,7 +46,12 @@ in your `main`:
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.gpa;
-    // ... use io and allocator ...
+
+    // Command-line args (sentinel-terminated strings):
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    _ = args;
+
+    // ... use io and allocator with the readers/writers below ...
 }
 ```
 

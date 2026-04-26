@@ -325,9 +325,9 @@ pub const XtcReader = struct {
         if (magic != XTC_MAGIC) return XtcError.InvalidMagic;
 
         self.natoms = self.readInt() catch return XtcError.ReadError;
-        if (self.natoms <= 0) return XtcError.ReadError;
+        if (self.natoms <= 0) return XtcError.InvalidAtomCount;
 
-        // Reset to beginning
+        // Rewind: we consumed the first header just to learn natoms; replay from byte 0.
         self.reader.seekTo(0) catch return XtcError.ReadError;
 
         // Allocate decompression buffers
