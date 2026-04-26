@@ -36,11 +36,8 @@ const Reference = struct {
     sample_frames: std.json.ArrayHashMap(SampleFrame),
 };
 
-fn loadReference(allocator: std.mem.Allocator, path: []const u8) !?std.json.Parsed(Reference) {
-    const file = std.fs.cwd().openFile(path, .{}) catch return null;
-    defer file.close();
-
-    const data = file.readToEndAlloc(allocator, 64 * 1024 * 1024) catch return null;
+fn loadReference(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !?std.json.Parsed(Reference) {
+    const data = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024)) catch return null;
     defer allocator.free(data);
 
     return std.json.parseFromSlice(Reference, allocator, data, .{
@@ -59,9 +56,15 @@ fn validateFrame(coords: []f32, ref_coords: []f64, tolerance: f32) bool {
     return true;
 }
 
-fn benchmarkXtc(allocator: std.mem.Allocator, path: []const u8, name: []const u8, ref_path: ?[]const u8) !?BenchResult {
+fn elapsedMs(io: std.Io, start: std.Io.Timestamp) f64 {
+    const end = std.Io.Timestamp.now(io, .awake);
+    const duration = start.durationTo(end);
+    return @as(f64, @floatFromInt(@as(i64, @intCast(duration.nanoseconds)))) / 1_000_000.0;
+}
+
+fn benchmarkXtc(io: std.Io, allocator: std.mem.Allocator, path: []const u8, name: []const u8, ref_path: ?[]const u8) !?BenchResult {
     const file_size = blk: {
-        const stat = std.fs.cwd().statFile(path) catch return null;
+        const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch return null;
         break :blk stat.size;
     };
 
@@ -69,10 +72,10 @@ fn benchmarkXtc(allocator: std.mem.Allocator, path: []const u8, name: []const u8
     var parsed_ref: ?std.json.Parsed(Reference) = null;
     defer if (parsed_ref) |*p| p.deinit();
     if (ref_path) |rp| {
-        parsed_ref = try loadReference(allocator, rp);
+        parsed_ref = try loadReference(io, allocator, rp);
     }
 
-    var reader = XtcReader.open(allocator, path) catch return null;
+    var reader = XtcReader.open(io, allocator, path) catch return null;
     defer reader.close();
 
     const natoms = reader.getNumAtoms();
@@ -80,7 +83,7 @@ fn benchmarkXtc(allocator: std.mem.Allocator, path: []const u8, name: []const u8
     const validated = parsed_ref != null;
     var validation_ok = true;
 
-    var timer = try std.time.Timer.start();
+    const start = std.Io.Timestamp.now(io, .awake);
 
     while (true) {
         var frame = reader.readFrame() catch |err| {
@@ -103,8 +106,7 @@ fn benchmarkXtc(allocator: std.mem.Allocator, path: []const u8, name: []const u8
         n_frames += 1;
     }
 
-    const elapsed_ns = timer.read();
-    const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
+    const elapsed_ms = elapsedMs(io, start);
     const file_size_mb = @as(f64, @floatFromInt(file_size)) / (1024.0 * 1024.0);
     const throughput = file_size_mb / (elapsed_ms / 1000.0);
     const fps = @as(f64, @floatFromInt(n_frames)) / (elapsed_ms / 1000.0);
@@ -129,19 +131,19 @@ fn benchmarkXtc(allocator: std.mem.Allocator, path: []const u8, name: []const u8
     };
 }
 
-fn benchmarkTrr(allocator: std.mem.Allocator, path: []const u8, name: []const u8, ref_path: ?[]const u8) !?BenchResult {
+fn benchmarkTrr(io: std.Io, allocator: std.mem.Allocator, path: []const u8, name: []const u8, ref_path: ?[]const u8) !?BenchResult {
     const file_size = blk: {
-        const stat = std.fs.cwd().statFile(path) catch return null;
+        const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch return null;
         break :blk stat.size;
     };
 
     var parsed_ref: ?std.json.Parsed(Reference) = null;
     defer if (parsed_ref) |*p| p.deinit();
     if (ref_path) |rp| {
-        parsed_ref = try loadReference(allocator, rp);
+        parsed_ref = try loadReference(io, allocator, rp);
     }
 
-    var reader = TrrReader.open(allocator, path) catch return null;
+    var reader = TrrReader.open(io, allocator, path) catch return null;
     defer reader.close();
 
     const natoms = reader.getNumAtoms();
@@ -149,7 +151,7 @@ fn benchmarkTrr(allocator: std.mem.Allocator, path: []const u8, name: []const u8
     const validated = parsed_ref != null;
     var validation_ok = true;
 
-    var timer = try std.time.Timer.start();
+    const start = std.Io.Timestamp.now(io, .awake);
 
     while (true) {
         var frame = reader.readFrame() catch |err| {
@@ -174,8 +176,7 @@ fn benchmarkTrr(allocator: std.mem.Allocator, path: []const u8, name: []const u8
         n_frames += 1;
     }
 
-    const elapsed_ns = timer.read();
-    const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
+    const elapsed_ms = elapsedMs(io, start);
     const file_size_mb = @as(f64, @floatFromInt(file_size)) / (1024.0 * 1024.0);
     const throughput = file_size_mb / (elapsed_ms / 1000.0);
     const fps = @as(f64, @floatFromInt(n_frames)) / (elapsed_ms / 1000.0);
@@ -219,10 +220,9 @@ const BenchEntry = struct {
     ref_path: ?[]const u8 = null,
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
     std.debug.print("\n=== zxdrfile benchmark ===\n\n", .{});
 
@@ -234,7 +234,7 @@ pub fn main() !void {
         .{ .path = "benchmarks/md_data/6sup_A_R1.xtc", .name = "6sup_A (33377 atoms)", .ref_path = "benchmarks/reference/6sup_A_R1_xtc_reference.json" },
     };
     for (xtc_files) |f| {
-        if (try benchmarkXtc(allocator, f.path, f.name, f.ref_path)) |r| {
+        if (try benchmarkXtc(io, allocator, f.path, f.name, f.ref_path)) |r| {
             printResult(r);
         }
     }
@@ -247,7 +247,7 @@ pub fn main() !void {
         .{ .path = "benchmarks/md_data/6sup_A_R1.trr", .name = "6sup_A (33377 atoms)", .ref_path = "benchmarks/reference/6sup_A_R1_trr_reference.json" },
     };
     for (trr_files) |f| {
-        if (try benchmarkTrr(allocator, f.path, f.name, f.ref_path)) |r| {
+        if (try benchmarkTrr(io, allocator, f.path, f.name, f.ref_path)) |r| {
             printResult(r);
         }
     }

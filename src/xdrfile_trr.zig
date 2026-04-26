@@ -96,46 +96,47 @@ pub const TrrFrame = struct {
 
 /// TRR file reader
 pub const TrrReader = struct {
-    file: std.fs.File,
-    reader: std.fs.File.Reader,
+    io_handle: std.Io,
+    file: std.Io.File,
+    reader: std.Io.File.Reader,
     read_buf: *[READ_BUF_SIZE]u8,
     allocator: Allocator,
     natoms: i32,
 
     const Self = @This();
 
-    pub fn open(allocator: Allocator, path: []const u8) !Self {
-        const file = std.fs.cwd().openFile(path, .{}) catch {
+    pub fn open(io_handle: std.Io, allocator: Allocator, path: []const u8) !Self {
+        const file = std.Io.Dir.cwd().openFile(io_handle, path, .{}) catch {
             return TrrError.FileNotFound;
         };
-        errdefer file.close();
+        errdefer file.close(io_handle);
 
         const read_buf = allocator.create([READ_BUF_SIZE]u8) catch return TrrError.OutOfMemory;
         errdefer allocator.destroy(read_buf);
 
         var self = Self{
+            .io_handle = io_handle,
             .file = file,
             .reader = undefined,
             .read_buf = read_buf,
             .allocator = allocator,
             .natoms = 0,
         };
-        self.reader = file.reader(read_buf);
+        self.reader = file.reader(io_handle, read_buf);
 
         // Read first header to get natoms
         const header = try self.readHeader();
         self.natoms = header.natoms;
 
         // Reset to beginning
-        file.seekTo(0) catch return TrrError.ReadError;
-        self.reader = file.reader(read_buf);
+        self.reader.seekTo(0) catch return TrrError.ReadError;
 
         return self;
     }
 
     pub fn close(self: *Self) void {
         self.allocator.destroy(self.read_buf);
-        self.file.close();
+        self.file.close(self.io_handle);
     }
 
     pub fn getNumAtoms(self: *const Self) i32 {
@@ -286,7 +287,7 @@ pub const TrrReader = struct {
         return header;
     }
 
-    inline fn io(self: *Self) *std.io.Reader {
+    inline fn io(self: *Self) *std.Io.Reader {
         return &self.reader.interface;
     }
 
@@ -335,7 +336,7 @@ pub const TrrReader = struct {
         self.io().discardAll(count) catch |err| return mapIoError(err);
     }
 
-    fn mapIoError(err: std.io.Reader.Error) TrrError {
+    fn mapIoError(err: std.Io.Reader.Error) TrrError {
         return switch (err) {
             error.EndOfStream => TrrError.EndOfFile,
             error.ReadFailed => TrrError.ReadError,
@@ -376,8 +377,9 @@ const WRITE_BUF_SIZE = 65536;
 
 /// TRR file writer (single-precision output)
 pub const TrrWriter = struct {
-    file: std.fs.File,
-    writer: std.fs.File.Writer,
+    io_handle: std.Io,
+    file: std.Io.File,
+    writer: std.Io.File.Writer,
     write_buf: *[WRITE_BUF_SIZE]u8,
     allocator: Allocator,
     natoms: i32,
@@ -386,51 +388,53 @@ pub const TrrWriter = struct {
 
     pub const Mode = enum { write, append };
 
-    pub fn open(allocator: Allocator, path: []const u8, natoms: i32, mode: Mode) !Self {
+    pub fn open(io_handle: std.Io, allocator: Allocator, path: []const u8, natoms: i32, mode: Mode) !Self {
         if (natoms <= 0) return TrrError.InvalidAtomCount;
 
         switch (mode) {
             .write => {
-                const file = std.fs.cwd().createFile(path, .{}) catch |err| {
+                const file = std.Io.Dir.cwd().createFile(io_handle, path, .{}) catch |err| {
                     return switch (err) {
                         error.FileNotFound => TrrError.FileNotFound,
                         else => TrrError.WriteError,
                     };
                 };
-                errdefer file.close();
+                errdefer file.close(io_handle);
 
                 const write_buf = allocator.create([WRITE_BUF_SIZE]u8) catch return TrrError.OutOfMemory;
                 errdefer allocator.destroy(write_buf);
 
                 return Self{
+                    .io_handle = io_handle,
                     .file = file,
-                    .writer = file.writer(write_buf),
+                    .writer = file.writer(io_handle, write_buf),
                     .write_buf = write_buf,
                     .allocator = allocator,
                     .natoms = natoms,
                 };
             },
             .append => {
-                const file = std.fs.cwd().openFile(path, .{ .mode = .read_write }) catch |err| {
+                const file = std.Io.Dir.cwd().openFile(io_handle, path, .{ .mode = .read_write }) catch |err| {
                     return switch (err) {
                         error.FileNotFound => TrrError.FileNotFound,
                         else => TrrError.WriteError,
                     };
                 };
-                errdefer file.close();
+                errdefer file.close(io_handle);
 
                 const write_buf = allocator.create([WRITE_BUF_SIZE]u8) catch return TrrError.OutOfMemory;
                 errdefer allocator.destroy(write_buf);
 
                 // Validate natoms from existing file and get file size
-                const file_size = file.getEndPos() catch return TrrError.ReadError;
+                const file_size = file.length(io_handle) catch return TrrError.ReadError;
                 if (file_size > 0) {
                     const read_buf = allocator.create([READ_BUF_SIZE]u8) catch return TrrError.OutOfMemory;
                     defer allocator.destroy(read_buf);
 
                     var temp_reader = TrrReader{
+                        .io_handle = io_handle,
                         .file = file,
-                        .reader = file.reader(read_buf),
+                        .reader = file.reader(io_handle, read_buf),
                         .read_buf = read_buf,
                         .allocator = allocator,
                         .natoms = 0,
@@ -443,10 +447,11 @@ pub const TrrWriter = struct {
 
                 // Use positional writer: set pos to end of file so writes
                 // append without disturbing the OS seek position.
-                var w = file.writer(write_buf);
+                var w = file.writer(io_handle, write_buf);
                 w.pos = file_size;
 
                 return Self{
+                    .io_handle = io_handle,
                     .file = file,
                     .writer = w,
                     .write_buf = write_buf,
@@ -460,7 +465,7 @@ pub const TrrWriter = struct {
     pub fn close(self: *Self) !void {
         const flush_result = self.writer.interface.flush();
         self.allocator.destroy(self.write_buf);
-        self.file.close();
+        self.file.close(self.io_handle);
         flush_result catch return TrrError.WriteError;
     }
 
@@ -641,14 +646,14 @@ pub const TrrWriter = struct {
 
 test "TrrReader open non-existent file" {
     const allocator = std.testing.allocator;
-    const result = TrrReader.open(allocator, "non_existent.trr");
+    const result = TrrReader.open(std.testing.io, allocator, "non_existent.trr");
     try std.testing.expectError(TrrError.FileNotFound, result);
 }
 
 test "read frame0.trr first frame" {
     const allocator = std.testing.allocator;
 
-    var reader = try TrrReader.open(allocator, "test_data/frame0.trr");
+    var reader = try TrrReader.open(std.testing.io, allocator, "test_data/frame0.trr");
     defer reader.close();
 
     // frame0.trr has 22 atoms
@@ -689,7 +694,7 @@ test "read frame0.trr first frame" {
 test "read frame0.trr all frames" {
     const allocator = std.testing.allocator;
 
-    var reader = try TrrReader.open(allocator, "test_data/frame0.trr");
+    var reader = try TrrReader.open(std.testing.io, allocator, "test_data/frame0.trr");
     defer reader.close();
 
     var frame_count: usize = 0;
@@ -711,7 +716,7 @@ test "read frame0.trr all frames" {
 test "read frame0.trr last frame" {
     const allocator = std.testing.allocator;
 
-    var reader = try TrrReader.open(allocator, "test_data/frame0.trr");
+    var reader = try TrrReader.open(std.testing.io, allocator, "test_data/frame0.trr");
     defer reader.close();
 
     const tolerance: f32 = 0.01;
@@ -757,7 +762,7 @@ test "TrrWriter write and read back single frame" {
 
     // Write a frame
     {
-        var writer = try TrrWriter.open(allocator, tmp_path, 3, .write);
+        var writer = try TrrWriter.open(std.testing.io, allocator, tmp_path, 3, .write);
         defer writer.close() catch {};
 
         const coords = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0 };
@@ -781,9 +786,9 @@ test "TrrWriter write and read back single frame" {
     }
 
     // Read it back
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_path) catch {};
 
-    var reader = try TrrReader.open(allocator, tmp_path);
+    var reader = try TrrReader.open(std.testing.io, allocator, tmp_path);
     defer reader.close();
 
     try std.testing.expectEqual(@as(i32, 3), reader.getNumAtoms());
@@ -810,7 +815,7 @@ test "TrrWriter write frame with x, v, f" {
     const tmp_path = "test_data/trr_tmp_write_xvf.trr";
 
     {
-        var writer = try TrrWriter.open(allocator, tmp_path, 2, .write);
+        var writer = try TrrWriter.open(std.testing.io, allocator, tmp_path, 2, .write);
         defer writer.close() catch {};
 
         const coords = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 };
@@ -831,9 +836,9 @@ test "TrrWriter write frame with x, v, f" {
         try writer.writeFrame(frame);
     }
 
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_path) catch {};
 
-    var reader = try TrrReader.open(allocator, tmp_path);
+    var reader = try TrrReader.open(std.testing.io, allocator, tmp_path);
     defer reader.close();
 
     var frame = try reader.readFrame();
@@ -852,7 +857,7 @@ test "TrrWriter write multiple frames" {
     const tmp_path = "test_data/trr_tmp_write_multi.trr";
 
     {
-        var writer = try TrrWriter.open(allocator, tmp_path, 2, .write);
+        var writer = try TrrWriter.open(std.testing.io, allocator, tmp_path, 2, .write);
         defer writer.close() catch {};
 
         for (0..5) |i| {
@@ -876,9 +881,9 @@ test "TrrWriter write multiple frames" {
         }
     }
 
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_path) catch {};
 
-    var reader = try TrrReader.open(allocator, tmp_path);
+    var reader = try TrrReader.open(std.testing.io, allocator, tmp_path);
     defer reader.close();
 
     var count: usize = 0;
@@ -900,7 +905,7 @@ test "TrrWriter append mode" {
 
     // Write 2 frames
     {
-        var writer = try TrrWriter.open(allocator, tmp_path, 1, .write);
+        var writer = try TrrWriter.open(std.testing.io, allocator, tmp_path, 1, .write);
         defer writer.close() catch {};
 
         for (0..2) |i| {
@@ -923,7 +928,7 @@ test "TrrWriter append mode" {
 
     // Append 3 more frames
     {
-        var writer = try TrrWriter.open(allocator, tmp_path, 1, .append);
+        var writer = try TrrWriter.open(std.testing.io, allocator, tmp_path, 1, .append);
         defer writer.close() catch {};
 
         for (2..5) |i| {
@@ -944,10 +949,10 @@ test "TrrWriter append mode" {
         }
     }
 
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_path) catch {};
 
     // Read all 5 frames
-    var reader = try TrrReader.open(allocator, tmp_path);
+    var reader = try TrrReader.open(std.testing.io, allocator, tmp_path);
     defer reader.close();
 
     var count: usize = 0;
@@ -967,10 +972,10 @@ test "TrrWriter rejects mismatched array length" {
     const allocator = std.testing.allocator;
     const tmp_path = "test_data/trr_tmp_write_err.trr";
 
-    var writer = try TrrWriter.open(allocator, tmp_path, 2, .write);
+    var writer = try TrrWriter.open(std.testing.io, allocator, tmp_path, 2, .write);
     defer {
         writer.close() catch {};
-        std.fs.cwd().deleteFile(tmp_path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_path) catch {};
     }
 
     // coords has 3 elements but natoms=2 expects 6
@@ -994,10 +999,10 @@ test "TrrWriter rejects has_x=true with null coords" {
     const allocator = std.testing.allocator;
     const tmp_path = "test_data/trr_tmp_write_null.trr";
 
-    var writer = try TrrWriter.open(allocator, tmp_path, 1, .write);
+    var writer = try TrrWriter.open(std.testing.io, allocator, tmp_path, 1, .write);
     defer {
         writer.close() catch {};
-        std.fs.cwd().deleteFile(tmp_path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_path) catch {};
     }
 
     const frame = TrrFrame{
@@ -1021,7 +1026,7 @@ test "TrrWriter append rejects natoms mismatch" {
 
     // Write with natoms=2
     {
-        var writer = try TrrWriter.open(allocator, tmp_path, 2, .write);
+        var writer = try TrrWriter.open(std.testing.io, allocator, tmp_path, 2, .write);
         defer writer.close() catch {};
         const coords = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 };
         const frame = TrrFrame{
@@ -1038,10 +1043,10 @@ test "TrrWriter append rejects natoms mismatch" {
         };
         try writer.writeFrame(frame);
     }
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_path) catch {};
 
     // Try to append with natoms=3 — should fail
-    const result = TrrWriter.open(allocator, tmp_path, 3, .append);
+    const result = TrrWriter.open(std.testing.io, allocator, tmp_path, 3, .append);
     try std.testing.expectError(TrrError.InvalidAtomCount, result);
 }
 
@@ -1051,12 +1056,12 @@ test "TrrWriter round-trip with frame0.trr" {
 
     // Read original and write all frames to new file
     {
-        var reader = try TrrReader.open(allocator, "test_data/frame0.trr");
+        var reader = try TrrReader.open(std.testing.io, allocator, "test_data/frame0.trr");
         defer reader.close();
 
         const natoms = reader.getNumAtoms();
 
-        var writer = try TrrWriter.open(allocator, tmp_path, natoms, .write);
+        var writer = try TrrWriter.open(std.testing.io, allocator, tmp_path, natoms, .write);
         defer writer.close() catch {};
 
         while (true) {
@@ -1069,13 +1074,13 @@ test "TrrWriter round-trip with frame0.trr" {
         }
     }
 
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_path) catch {};
 
     // Read back and compare with original
-    var reader_orig = try TrrReader.open(allocator, "test_data/frame0.trr");
+    var reader_orig = try TrrReader.open(std.testing.io, allocator, "test_data/frame0.trr");
     defer reader_orig.close();
 
-    var reader_copy = try TrrReader.open(allocator, tmp_path);
+    var reader_copy = try TrrReader.open(std.testing.io, allocator, tmp_path);
     defer reader_copy.close();
 
     try std.testing.expectEqual(reader_orig.getNumAtoms(), reader_copy.getNumAtoms());
@@ -1131,18 +1136,18 @@ test "TrrWriter round-trip with frame0.trr" {
 
 test "TrrWriter rejects natoms <= 0" {
     const allocator = std.testing.allocator;
-    try std.testing.expectError(TrrError.InvalidAtomCount, TrrWriter.open(allocator, "test_data/trr_tmp_zero.trr", 0, .write));
-    try std.testing.expectError(TrrError.InvalidAtomCount, TrrWriter.open(allocator, "test_data/trr_tmp_neg.trr", -1, .write));
+    try std.testing.expectError(TrrError.InvalidAtomCount, TrrWriter.open(std.testing.io, allocator, "test_data/trr_tmp_zero.trr", 0, .write));
+    try std.testing.expectError(TrrError.InvalidAtomCount, TrrWriter.open(std.testing.io, allocator, "test_data/trr_tmp_neg.trr", -1, .write));
 }
 
 test "TrrWriter rejects has_v=true with null velocities" {
     const allocator = std.testing.allocator;
     const tmp_path = "test_data/trr_tmp_write_null_v.trr";
 
-    var writer = try TrrWriter.open(allocator, tmp_path, 1, .write);
+    var writer = try TrrWriter.open(std.testing.io, allocator, tmp_path, 1, .write);
     defer {
         writer.close() catch {};
-        std.fs.cwd().deleteFile(tmp_path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_path) catch {};
     }
 
     const coords = [_]f32{ 1.0, 2.0, 3.0 };
@@ -1165,10 +1170,10 @@ test "TrrWriter rejects has_f=true with null forces" {
     const allocator = std.testing.allocator;
     const tmp_path = "test_data/trr_tmp_write_null_f.trr";
 
-    var writer = try TrrWriter.open(allocator, tmp_path, 1, .write);
+    var writer = try TrrWriter.open(std.testing.io, allocator, tmp_path, 1, .write);
     defer {
         writer.close() catch {};
-        std.fs.cwd().deleteFile(tmp_path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_path) catch {};
     }
 
     const coords = [_]f32{ 1.0, 2.0, 3.0 };

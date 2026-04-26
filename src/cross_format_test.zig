@@ -28,11 +28,11 @@ test "TRR → XTC → read back" {
     var natoms: i32 = 0;
     var frame_count: usize = 0;
     {
-        var reader = try TrrReader.open(allocator, "test_data/frame0.trr");
+        var reader = try TrrReader.open(std.testing.io, allocator, "test_data/frame0.trr");
         defer reader.close();
         natoms = reader.getNumAtoms();
 
-        var writer = try XtcWriter.open(allocator, xtc_path, natoms, .write);
+        var writer = try XtcWriter.open(std.testing.io, allocator, xtc_path, natoms, .write);
         defer writer.close() catch {};
 
         while (true) {
@@ -53,18 +53,18 @@ test "TRR → XTC → read back" {
             frame_count += 1;
         }
     }
-    defer std.fs.cwd().deleteFile(xtc_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, xtc_path) catch {};
 
     try std.testing.expectEqual(@as(usize, 501), frame_count);
 
     // Read back XTC and verify
-    var xtc_reader = try XtcReader.open(allocator, xtc_path);
+    var xtc_reader = try XtcReader.open(std.testing.io, allocator, xtc_path);
     defer xtc_reader.close();
 
     try std.testing.expectEqual(natoms, xtc_reader.getNumAtoms());
 
     // Also re-read TRR for comparison
-    var trr_reader = try TrrReader.open(allocator, "test_data/frame0.trr");
+    var trr_reader = try TrrReader.open(std.testing.io, allocator, "test_data/frame0.trr");
     defer trr_reader.close();
 
     const tolerance: f32 = 1.0 / precision + 0.001;
@@ -104,11 +104,11 @@ test "XTC → TRR → read back" {
     var natoms: i32 = 0;
     var frame_count: usize = 0;
     {
-        var reader = try XtcReader.open(allocator, "test_data/1l2y.xtc");
+        var reader = try XtcReader.open(std.testing.io, allocator, "test_data/1l2y.xtc");
         defer reader.close();
         natoms = reader.getNumAtoms();
 
-        var writer = try TrrWriter.open(allocator, trr_path, natoms, .write);
+        var writer = try TrrWriter.open(std.testing.io, allocator, trr_path, natoms, .write);
         defer writer.close() catch {};
 
         while (true) {
@@ -134,15 +134,15 @@ test "XTC → TRR → read back" {
             frame_count += 1;
         }
     }
-    defer std.fs.cwd().deleteFile(trr_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, trr_path) catch {};
 
     try std.testing.expectEqual(@as(usize, 38), frame_count);
 
     // Read back TRR and compare with original XTC
-    var xtc_reader = try XtcReader.open(allocator, "test_data/1l2y.xtc");
+    var xtc_reader = try XtcReader.open(std.testing.io, allocator, "test_data/1l2y.xtc");
     defer xtc_reader.close();
 
-    var trr_reader = try TrrReader.open(allocator, trr_path);
+    var trr_reader = try TrrReader.open(std.testing.io, allocator, trr_path);
     defer trr_reader.close();
 
     try std.testing.expectEqual(natoms, trr_reader.getNumAtoms());
@@ -185,11 +185,11 @@ test "TRR → XTC → TRR round-trip" {
 
     // Step 1: TRR → XTC
     {
-        var reader = try TrrReader.open(allocator, "test_data/frame0.trr");
+        var reader = try TrrReader.open(std.testing.io, allocator, "test_data/frame0.trr");
         defer reader.close();
         natoms = reader.getNumAtoms();
 
-        var writer = try XtcWriter.open(allocator, xtc_path, natoms, .write);
+        var writer = try XtcWriter.open(std.testing.io, allocator, xtc_path, natoms, .write);
         defer writer.close() catch {};
 
         while (true) {
@@ -207,14 +207,14 @@ test "TRR → XTC → TRR round-trip" {
             });
         }
     }
-    defer std.fs.cwd().deleteFile(xtc_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, xtc_path) catch {};
 
     // Step 2: XTC → TRR
     {
-        var reader = try XtcReader.open(allocator, xtc_path);
+        var reader = try XtcReader.open(std.testing.io, allocator, xtc_path);
         defer reader.close();
 
-        var writer = try TrrWriter.open(allocator, trr_path, natoms, .write);
+        var writer = try TrrWriter.open(std.testing.io, allocator, trr_path, natoms, .write);
         defer writer.close() catch {};
 
         while (true) {
@@ -237,13 +237,13 @@ test "TRR → XTC → TRR round-trip" {
             });
         }
     }
-    defer std.fs.cwd().deleteFile(trr_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, trr_path) catch {};
 
     // Step 3: Compare original TRR with TRR-via-XTC
-    var orig_reader = try TrrReader.open(allocator, "test_data/frame0.trr");
+    var orig_reader = try TrrReader.open(std.testing.io, allocator, "test_data/frame0.trr");
     defer orig_reader.close();
 
-    var conv_reader = try TrrReader.open(allocator, trr_path);
+    var conv_reader = try TrrReader.open(std.testing.io, allocator, trr_path);
     defer conv_reader.close();
 
     const tolerance: f32 = 1.0 / precision + 0.001;

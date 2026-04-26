@@ -4,13 +4,11 @@
 const std = @import("std");
 const xdrfile = @import("xdrfile.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len != 4) {
         std.debug.print("Usage: converter <trr_to_xtc|xtc_to_trr> <input> <output>\n", .{});
@@ -22,20 +20,20 @@ pub fn main() !void {
     const output_path = args[3];
 
     if (std.mem.eql(u8, mode, "trr_to_xtc")) {
-        try convertTrrToXtc(allocator, input_path, output_path);
+        try convertTrrToXtc(io, allocator, input_path, output_path);
     } else if (std.mem.eql(u8, mode, "xtc_to_trr")) {
-        try convertXtcToTrr(allocator, input_path, output_path);
+        try convertXtcToTrr(io, allocator, input_path, output_path);
     } else {
         std.debug.print("Unknown mode: {s}\n", .{mode});
         std.process.exit(1);
     }
 }
 
-fn convertTrrToXtc(allocator: std.mem.Allocator, input: []const u8, output: []const u8) !void {
-    var reader = try xdrfile.TrrReader.open(allocator, input);
+fn convertTrrToXtc(io: std.Io, allocator: std.mem.Allocator, input: []const u8, output: []const u8) !void {
+    var reader = try xdrfile.TrrReader.open(io, allocator, input);
     defer reader.close();
 
-    var writer = try xdrfile.XtcWriter.open(allocator, output, reader.getNumAtoms(), .write);
+    var writer = try xdrfile.XtcWriter.open(io, allocator, output, reader.getNumAtoms(), .write);
     defer writer.close() catch {};
 
     var count: usize = 0;
@@ -58,11 +56,11 @@ fn convertTrrToXtc(allocator: std.mem.Allocator, input: []const u8, output: []co
     std.debug.print("Converted {d} frames: TRR → XTC\n", .{count});
 }
 
-fn convertXtcToTrr(allocator: std.mem.Allocator, input: []const u8, output: []const u8) !void {
-    var reader = try xdrfile.XtcReader.open(allocator, input);
+fn convertXtcToTrr(io: std.Io, allocator: std.mem.Allocator, input: []const u8, output: []const u8) !void {
+    var reader = try xdrfile.XtcReader.open(io, allocator, input);
     defer reader.close();
 
-    var writer = try xdrfile.TrrWriter.open(allocator, output, reader.getNumAtoms(), .write);
+    var writer = try xdrfile.TrrWriter.open(io, allocator, output, reader.getNumAtoms(), .write);
     defer writer.close() catch {};
 
     var count: usize = 0;

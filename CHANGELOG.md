@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.3.0] - 2026-04-26
+
+### Changed (BREAKING)
+
+- **Zig 0.16 required**: bumped `minimum_zig_version` from `0.15.2` to `0.16.0`
+- **Public API now takes `std.Io`**: as part of the Zig 0.16 unified I/O interface (`std.Io`), all reader/writer entry points have a new first parameter:
+  - `XtcReader.open(io, allocator, path)`
+  - `XtcWriter.open(io, allocator, path, natoms, mode)`
+  - `TrrReader.open(io, allocator, path)`
+  - `TrrWriter.open(io, allocator, path, natoms, mode)`
+  Obtain `io` from `std.process.Init.io` in your `main` (recommended) or by initializing `std.Io.Threaded`.
+- `converter` and `benchmark` migrated to the new `pub fn main(init: std.process.Init)` entry-point convention.
+- Internal types: `std.fs.File` → `std.Io.File`, `std.io.Reader` → `std.Io.Reader`.
+
+### Migration
+
+```zig
+// 0.2.x
+var reader = try XtcReader.open(allocator, "traj.xtc");
+
+// 0.3.0
+var reader = try XtcReader.open(io, allocator, "traj.xtc");
+```
+
+In tests, use `std.testing.io` as the `io` argument.
+
 ## [0.2.0] - 2026-03-23
 
 ### Added

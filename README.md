@@ -1,6 +1,6 @@
 # zxdrfile
 
-[![Zig](https://img.shields.io/badge/Zig-0.15.2+-f7a41d?logo=zig&logoColor=white)](https://ziglang.org/)
+[![Zig](https://img.shields.io/badge/Zig-0.16.0+-f7a41d?logo=zig&logoColor=white)](https://ziglang.org/)
 [![CI](https://github.com/N283T/zxdrfile/actions/workflows/ci.yml/badge.svg)](https://github.com/N283T/zxdrfile/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-BSD_2--Clause-blue.svg)](LICENSE)
 
@@ -38,13 +38,27 @@ mod.addImport("zxdrfile", zxdrfile.module("zxdrfile"));
 
 ## Quick Start
 
+All reader/writer entry points take `io: std.Io` as their first argument
+(Zig 0.16's unified I/O interface). Obtain `io` from `std.process.Init.io`
+in your `main`:
+
+```zig
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.gpa;
+    // ... use io and allocator ...
+}
+```
+
+In tests, use `std.testing.io`.
+
 ### Reading
 
 ```zig
 const xdrfile = @import("zxdrfile");
 
 // XTC
-var reader = try xdrfile.XtcReader.open(allocator, "trajectory.xtc");
+var reader = try xdrfile.XtcReader.open(io, allocator, "trajectory.xtc");
 defer reader.close();
 
 while (true) {
@@ -57,7 +71,7 @@ while (true) {
 }
 
 // TRR
-var reader = try xdrfile.TrrReader.open(allocator, "trajectory.trr");
+var reader = try xdrfile.TrrReader.open(io, allocator, "trajectory.trr");
 defer reader.close();
 
 while (true) {
@@ -77,7 +91,7 @@ while (true) {
 const xdrfile = @import("zxdrfile");
 
 // XTC (lossy compression — precision controls accuracy)
-var writer = try xdrfile.XtcWriter.open(allocator, "output.xtc", natoms, .write);
+var writer = try xdrfile.XtcWriter.open(io, allocator, "output.xtc", natoms, .write);
 defer writer.close() catch {};
 
 try writer.writeFrame(.{
@@ -89,7 +103,7 @@ try writer.writeFrame(.{
 });
 
 // TRR (lossless)
-var writer = try xdrfile.TrrWriter.open(allocator, "output.trr", natoms, .write);
+var writer = try xdrfile.TrrWriter.open(io, allocator, "output.trr", natoms, .write);
 defer writer.close() catch {};
 
 try writer.writeFrame(.{
@@ -106,7 +120,7 @@ try writer.writeFrame(.{
 });
 
 // Append to existing file
-var writer = try xdrfile.TrrWriter.open(allocator, "existing.trr", natoms, .append);
+var writer = try xdrfile.TrrWriter.open(io, allocator, "existing.trr", natoms, .append);
 ```
 
 ## Building
@@ -120,7 +134,7 @@ zig build bench        # Run benchmarks (ReleaseFast)
 
 ## Requirements
 
-- Zig 0.15.2 or later
+- Zig 0.16.0 or later
 
 > **Note:** Zig has not yet reached 1.0 and its standard library API changes
 > frequently between versions. This library may not compile on versions other
