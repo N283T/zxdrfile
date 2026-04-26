@@ -67,6 +67,24 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(converter_exe);
 
+    // Smoke test: end-to-end exercise of the converter binary.
+    // Runs trr_to_xtc and xtc_to_trr round-trip, verifies exit codes and
+    // that std.process.Init plumbing (gpa, io, args, arena) works.
+    const smoke_trr_to_xtc = b.addRunArtifact(converter_exe);
+    smoke_trr_to_xtc.addArg("trr_to_xtc");
+    smoke_trr_to_xtc.addFileArg(b.path("test_data/frame0.trr"));
+    const smoke_xtc_out = smoke_trr_to_xtc.addOutputFileArg("smoke_out.xtc");
+    smoke_trr_to_xtc.expectExitCode(0);
+
+    const smoke_xtc_to_trr = b.addRunArtifact(converter_exe);
+    smoke_xtc_to_trr.addArg("xtc_to_trr");
+    smoke_xtc_to_trr.addFileArg(smoke_xtc_out);
+    _ = smoke_xtc_to_trr.addOutputFileArg("smoke_out.trr");
+    smoke_xtc_to_trr.expectExitCode(0);
+
+    const smoke_step = b.step("converter-smoke", "End-to-end smoke test of the converter binary");
+    smoke_step.dependOn(&smoke_xtc_to_trr.step);
+
     // Benchmark (always ReleaseFast for meaningful results)
     const bench_mod = b.addModule("benchmark", .{
         .root_source_file = b.path("src/benchmark.zig"),
