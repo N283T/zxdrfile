@@ -36,3 +36,6 @@ jobs:
 
       - name: Run cross-format tests
         run: zig build cross-format
+
+      - name: Run converter smoke test
+        run: zig build converter-smoke
