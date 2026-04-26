@@ -25,10 +25,7 @@ const Reference = struct {
 };
 
 fn parseReference(allocator: std.mem.Allocator, path: []const u8) !std.json.Parsed(Reference) {
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-
-    const data = try file.readToEndAlloc(allocator, 64 * 1024 * 1024);
+    const data = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(64 * 1024 * 1024));
     defer allocator.free(data);
 
     return std.json.parseFromSlice(Reference, allocator, data, .{ .allocate = .alloc_always });
@@ -49,7 +46,7 @@ test "validate XTC against mdtraj reference" {
     defer parsed.deinit();
     const ref = parsed.value;
 
-    var reader = try XtcReader.open(allocator, "test_data/1l2y.xtc");
+    var reader = try XtcReader.open(std.testing.io, allocator, "test_data/1l2y.xtc");
     defer reader.close();
 
     try std.testing.expectEqual(@as(i32, @intCast(ref.natoms)), reader.getNumAtoms());
@@ -98,7 +95,7 @@ test "validate TRR against mdtraj reference" {
     defer parsed.deinit();
     const ref = parsed.value;
 
-    var reader = try TrrReader.open(allocator, "test_data/frame0.trr");
+    var reader = try TrrReader.open(std.testing.io, allocator, "test_data/frame0.trr");
     defer reader.close();
 
     try std.testing.expectEqual(@as(i32, @intCast(ref.natoms)), reader.getNumAtoms());

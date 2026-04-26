@@ -286,8 +286,9 @@ fn encodeints(buf: []i32, num_of_ints: usize, num_of_bits: u32, sizes: []const u
 
 /// XTC file reader
 pub const XtcReader = struct {
-    file: std.fs.File,
-    reader: std.fs.File.Reader,
+    io_handle: std.Io,
+    file: std.Io.File,
+    reader: std.Io.File.Reader,
     read_buf: *[READ_BUF_SIZE]u8,
     allocator: Allocator,
     natoms: i32,
@@ -298,16 +299,17 @@ pub const XtcReader = struct {
 
     const Self = @This();
 
-    pub fn open(allocator: Allocator, path: []const u8) !Self {
-        const file = std.fs.cwd().openFile(path, .{}) catch {
+    pub fn open(io_handle: std.Io, allocator: Allocator, path: []const u8) !Self {
+        const file = std.Io.Dir.cwd().openFile(io_handle, path, .{}) catch {
             return XtcError.FileNotFound;
         };
-        errdefer file.close();
+        errdefer file.close(io_handle);
 
         const read_buf = allocator.create([READ_BUF_SIZE]u8) catch return XtcError.OutOfMemory;
         errdefer allocator.destroy(read_buf);
 
         var self = Self{
+            .io_handle = io_handle,
             .file = file,
             .reader = undefined,
             .read_buf = read_buf,
@@ -316,18 +318,17 @@ pub const XtcReader = struct {
             .buf1 = &[_]i32{},
             .buf2 = &[_]i32{},
         };
-        self.reader = file.reader(read_buf);
+        self.reader = file.reader(io_handle, read_buf);
 
         // Read first frame header to get natoms
         const magic = self.readInt() catch return XtcError.ReadError;
         if (magic != XTC_MAGIC) return XtcError.InvalidMagic;
 
         self.natoms = self.readInt() catch return XtcError.ReadError;
-        if (self.natoms <= 0) return XtcError.ReadError;
+        if (self.natoms <= 0) return XtcError.InvalidAtomCount;
 
-        // Reset to beginning
-        file.seekTo(0) catch return XtcError.ReadError;
-        self.reader = file.reader(read_buf);
+        // Rewind: we consumed the first header just to learn natoms; replay from byte 0.
+        self.reader.seekTo(0) catch return XtcError.ReadError;
 
         // Allocate decompression buffers
         const natoms_u: usize = @intCast(self.natoms);
@@ -345,7 +346,7 @@ pub const XtcReader = struct {
         self.allocator.free(self.buf1);
         self.allocator.free(self.buf2);
         self.allocator.destroy(self.read_buf);
-        self.file.close();
+        self.file.close(self.io_handle);
     }
 
     pub fn getNumAtoms(self: *const Self) i32 {
@@ -402,11 +403,11 @@ pub const XtcReader = struct {
     // XDR I/O (big-endian, 4 bytes per element)
     // ============================================
 
-    inline fn io(self: *Self) *std.io.Reader {
+    inline fn io(self: *Self) *std.Io.Reader {
         return &self.reader.interface;
     }
 
-    fn mapIoError(err: std.io.Reader.Error) XtcError {
+    fn mapIoError(err: std.Io.Reader.Error) XtcError {
         return switch (err) {
             error.EndOfStream => XtcError.EndOfFile,
             error.ReadFailed => XtcError.ReadError,
@@ -652,8 +653,9 @@ const WRITE_BUF_SIZE = 65536;
 
 /// XTC file writer (single-precision with coordinate compression)
 pub const XtcWriter = struct {
-    file: std.fs.File,
-    writer: std.fs.File.Writer,
+    io_handle: std.Io,
+    file: std.Io.File,
+    writer: std.Io.File.Writer,
     write_buf: *[WRITE_BUF_SIZE]u8,
     allocator: Allocator,
     natoms: i32,
@@ -666,7 +668,7 @@ pub const XtcWriter = struct {
 
     pub const Mode = enum { write, append };
 
-    pub fn open(allocator: Allocator, path: []const u8, natoms: i32, mode: Mode) !Self {
+    pub fn open(io_handle: std.Io, allocator: Allocator, path: []const u8, natoms: i32, mode: Mode) !Self {
         if (natoms <= 0) return XtcError.InvalidAtomCount;
 
         const natoms_u: usize = @intCast(natoms);
@@ -683,20 +685,21 @@ pub const XtcWriter = struct {
 
         switch (mode) {
             .write => {
-                const file = std.fs.cwd().createFile(path, .{}) catch |err| {
+                const file = std.Io.Dir.cwd().createFile(io_handle, path, .{}) catch |err| {
                     return switch (err) {
                         error.FileNotFound => XtcError.FileNotFound,
                         else => XtcError.WriteError,
                     };
                 };
-                errdefer file.close();
+                errdefer file.close(io_handle);
 
                 const write_buf = allocator.create([WRITE_BUF_SIZE]u8) catch return XtcError.OutOfMemory;
                 errdefer allocator.destroy(write_buf);
 
                 return Self{
+                    .io_handle = io_handle,
                     .file = file,
-                    .writer = file.writer(write_buf),
+                    .writer = file.writer(io_handle, write_buf),
                     .write_buf = write_buf,
                     .allocator = allocator,
                     .natoms = natoms,
@@ -705,24 +708,24 @@ pub const XtcWriter = struct {
                 };
             },
             .append => {
-                const file = std.fs.cwd().openFile(path, .{ .mode = .read_write }) catch |err| {
+                const file = std.Io.Dir.cwd().openFile(io_handle, path, .{ .mode = .read_write }) catch |err| {
                     return switch (err) {
                         error.FileNotFound => XtcError.FileNotFound,
                         else => XtcError.WriteError,
                     };
                 };
-                errdefer file.close();
+                errdefer file.close(io_handle);
 
                 const write_buf = allocator.create([WRITE_BUF_SIZE]u8) catch return XtcError.OutOfMemory;
                 errdefer allocator.destroy(write_buf);
 
                 // Validate natoms from existing file, then seek to end
-                const file_size = file.getEndPos() catch return XtcError.ReadError;
+                const file_size = file.length(io_handle) catch return XtcError.ReadError;
                 if (file_size > 0) {
                     const read_buf = allocator.create([READ_BUF_SIZE]u8) catch return XtcError.OutOfMemory;
                     defer allocator.destroy(read_buf);
 
-                    var temp_reader = file.reader(read_buf);
+                    var temp_reader = file.reader(io_handle, read_buf);
                     const magic_buf = temp_reader.interface.takeArray(4) catch return XtcError.ReadError;
                     const magic: i32 = @bitCast(std.mem.readInt(u32, magic_buf, .big));
                     if (magic != XTC_MAGIC) return XtcError.InvalidMagic;
@@ -733,10 +736,11 @@ pub const XtcWriter = struct {
                 }
 
                 // Use positional writer: set pos to end of file so writes append
-                var w = file.writer(write_buf);
+                var w = file.writer(io_handle, write_buf);
                 w.pos = file_size;
 
                 return Self{
+                    .io_handle = io_handle,
                     .file = file,
                     .writer = w,
                     .write_buf = write_buf,
@@ -756,7 +760,7 @@ pub const XtcWriter = struct {
         self.allocator.free(self.buf1);
         self.allocator.free(self.buf2);
         self.allocator.destroy(self.write_buf);
-        self.file.close();
+        self.file.close(self.io_handle);
         flush_result catch return XtcError.WriteError;
     }
 
@@ -1102,7 +1106,7 @@ test "magicints table" {
 test "read 1l2y.xtc first frame" {
     const allocator = std.testing.allocator;
 
-    var reader = try XtcReader.open(allocator, "test_data/1l2y.xtc");
+    var reader = try XtcReader.open(std.testing.io, allocator, "test_data/1l2y.xtc");
     defer reader.close();
 
     const natoms = reader.getNumAtoms();
@@ -1144,7 +1148,7 @@ test "read 1l2y.xtc first frame" {
 test "read 1l2y.xtc all frames" {
     const allocator = std.testing.allocator;
 
-    var reader = try XtcReader.open(allocator, "test_data/1l2y.xtc");
+    var reader = try XtcReader.open(std.testing.io, allocator, "test_data/1l2y.xtc");
     defer reader.close();
 
     var frame_count: usize = 0;
@@ -1165,7 +1169,7 @@ test "read 1l2y.xtc all frames" {
 test "read large xtc (6qfk 90MB)" {
     const allocator = std.testing.allocator;
 
-    var reader = XtcReader.open(allocator, "benchmarks/md_data/6qfk_A_analysis/6qfk_A_R1.xtc") catch |err| {
+    var reader = XtcReader.open(std.testing.io, allocator, "benchmarks/md_data/6qfk_A_analysis/6qfk_A_R1.xtc") catch |err| {
         if (err == error.FileNotFound) return;
         return err;
     };
@@ -1209,7 +1213,7 @@ test "read large xtc (6qfk 90MB)" {
 test "read very large xtc (5ltj 511MB)" {
     const allocator = std.testing.allocator;
 
-    var reader = XtcReader.open(allocator, "benchmarks/md_data/5ltj_A_protein/5ltj_A_prod_R1_fit.xtc") catch |err| {
+    var reader = XtcReader.open(std.testing.io, allocator, "benchmarks/md_data/5ltj_A_protein/5ltj_A_prod_R1_fit.xtc") catch |err| {
         if (err == error.FileNotFound) return;
         return err;
     };
@@ -1251,7 +1255,7 @@ test "XtcWriter round-trip: 3 atoms (small path, no compression)" {
     const tmp_path = "test_data/xtc_tmp_xtc_write_3.xtc";
 
     {
-        var writer = try XtcWriter.open(allocator, tmp_path, 3, .write);
+        var writer = try XtcWriter.open(std.testing.io, allocator, tmp_path, 3, .write);
         defer writer.close() catch {};
 
         var coords = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0 };
@@ -1269,9 +1273,9 @@ test "XtcWriter round-trip: 3 atoms (small path, no compression)" {
         try writer.writeFrame(frame);
     }
 
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_path) catch {};
 
-    var reader = try XtcReader.open(allocator, tmp_path);
+    var reader = try XtcReader.open(std.testing.io, allocator, tmp_path);
     defer reader.close();
 
     try std.testing.expectEqual(@as(i32, 3), reader.getNumAtoms());
@@ -1303,7 +1307,7 @@ test "XtcWriter round-trip: 20 atoms (full compression path)" {
     }
 
     {
-        var writer = try XtcWriter.open(allocator, tmp_path, natoms, .write);
+        var writer = try XtcWriter.open(std.testing.io, allocator, tmp_path, natoms, .write);
         defer writer.close() catch {};
 
         const frame = XtcFrame{
@@ -1320,9 +1324,9 @@ test "XtcWriter round-trip: 20 atoms (full compression path)" {
         try writer.writeFrame(frame);
     }
 
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_path) catch {};
 
-    var reader = try XtcReader.open(allocator, tmp_path);
+    var reader = try XtcReader.open(std.testing.io, allocator, tmp_path);
     defer reader.close();
 
     try std.testing.expectEqual(@as(i32, natoms), reader.getNumAtoms());
@@ -1356,7 +1360,7 @@ test "XtcWriter multi-frame: write 5 frames, verify step and coord values" {
     }
 
     {
-        var writer = try XtcWriter.open(allocator, tmp_path, natoms, .write);
+        var writer = try XtcWriter.open(std.testing.io, allocator, tmp_path, natoms, .write);
         defer writer.close() catch {};
 
         for (0..num_frames) |f| {
@@ -1375,9 +1379,9 @@ test "XtcWriter multi-frame: write 5 frames, verify step and coord values" {
         }
     }
 
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_path) catch {};
 
-    var reader = try XtcReader.open(allocator, tmp_path);
+    var reader = try XtcReader.open(std.testing.io, allocator, tmp_path);
     defer reader.close();
 
     try std.testing.expectEqual(@as(i32, natoms), reader.getNumAtoms());
@@ -1416,7 +1420,7 @@ test "XtcWriter append mode: write 2 then append 3, read all 5" {
 
     // Write first 2 frames
     {
-        var writer = try XtcWriter.open(allocator, tmp_path, natoms, .write);
+        var writer = try XtcWriter.open(std.testing.io, allocator, tmp_path, natoms, .write);
         defer writer.close() catch {};
 
         for (0..2) |f| {
@@ -1437,7 +1441,7 @@ test "XtcWriter append mode: write 2 then append 3, read all 5" {
 
     // Append 3 more frames
     {
-        var writer = try XtcWriter.open(allocator, tmp_path, natoms, .append);
+        var writer = try XtcWriter.open(std.testing.io, allocator, tmp_path, natoms, .append);
         defer writer.close() catch {};
 
         for (2..5) |f| {
@@ -1456,9 +1460,9 @@ test "XtcWriter append mode: write 2 then append 3, read all 5" {
         }
     }
 
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_path) catch {};
 
-    var reader = try XtcReader.open(allocator, tmp_path);
+    var reader = try XtcReader.open(std.testing.io, allocator, tmp_path);
     defer reader.close();
 
     try std.testing.expectEqual(@as(i32, natoms), reader.getNumAtoms());
@@ -1489,7 +1493,7 @@ test "XtcWriter round-trip with 1l2y.xtc (304 atoms, all 38 frames)" {
     var src_frame_count: usize = 0;
 
     {
-        var src_reader = try XtcReader.open(allocator, src_path);
+        var src_reader = try XtcReader.open(std.testing.io, allocator, src_path);
         defer src_reader.close();
 
         const natoms = src_reader.getNumAtoms();
@@ -1517,7 +1521,7 @@ test "XtcWriter round-trip with 1l2y.xtc (304 atoms, all 38 frames)" {
 
     // Write all frames to a temporary file
     {
-        var writer = try XtcWriter.open(allocator, tmp_path, @as(i32, 304), .write);
+        var writer = try XtcWriter.open(std.testing.io, allocator, tmp_path, @as(i32, 304), .write);
         defer writer.close() catch {};
 
         for (0..src_frame_count) |i| {
@@ -1525,10 +1529,10 @@ test "XtcWriter round-trip with 1l2y.xtc (304 atoms, all 38 frames)" {
         }
     }
 
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_path) catch {};
 
     // Read back and compare every frame coordinate-by-coordinate
-    var dst_reader = try XtcReader.open(allocator, tmp_path);
+    var dst_reader = try XtcReader.open(std.testing.io, allocator, tmp_path);
     defer dst_reader.close();
 
     try std.testing.expectEqual(@as(i32, 304), dst_reader.getNumAtoms());
@@ -1556,10 +1560,10 @@ test "XtcWriter error paths" {
 
     // natoms <= 0 must return InvalidAtomCount
     {
-        const result = XtcWriter.open(allocator, "test_data/xtc_tmp_xtc_err_zero.xtc", 0, .write);
+        const result = XtcWriter.open(std.testing.io, allocator, "test_data/xtc_tmp_xtc_err_zero.xtc", 0, .write);
         try std.testing.expectError(XtcError.InvalidAtomCount, result);
 
-        const result_neg = XtcWriter.open(allocator, "test_data/xtc_tmp_xtc_err_neg.xtc", -5, .write);
+        const result_neg = XtcWriter.open(std.testing.io, allocator, "test_data/xtc_tmp_xtc_err_neg.xtc", -5, .write);
         try std.testing.expectError(XtcError.InvalidAtomCount, result_neg);
     }
 
@@ -1567,9 +1571,9 @@ test "XtcWriter error paths" {
     {
         const tmp_path = "test_data/xtc_tmp_xtc_err_coords.xtc";
 
-        var writer = try XtcWriter.open(allocator, tmp_path, 20, .write);
+        var writer = try XtcWriter.open(std.testing.io, allocator, tmp_path, 20, .write);
         defer writer.close() catch {};
-        defer std.fs.cwd().deleteFile(tmp_path) catch {};
+        defer std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_path) catch {};
 
         // Provide only 3 coords instead of 60
         var short_coords = [_]f32{ 1.0, 2.0, 3.0 };
@@ -1594,7 +1598,7 @@ test "XtcWriter error paths" {
 
         // Create file with natoms=20
         {
-            var writer = try XtcWriter.open(allocator, tmp_path, 20, .write);
+            var writer = try XtcWriter.open(std.testing.io, allocator, tmp_path, 20, .write);
             defer writer.close() catch {};
 
             var coords: [20 * 3]f32 = undefined;
@@ -1613,10 +1617,10 @@ test "XtcWriter error paths" {
             try writer.writeFrame(frame);
         }
 
-        defer std.fs.cwd().deleteFile(tmp_path) catch {};
+        defer std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_path) catch {};
 
         // Try to append with natoms=10 (mismatch — file has 20)
-        const append_result = XtcWriter.open(allocator, tmp_path, 10, .append);
+        const append_result = XtcWriter.open(std.testing.io, allocator, tmp_path, 10, .append);
         try std.testing.expectError(XtcError.InvalidAtomCount, append_result);
     }
 }
