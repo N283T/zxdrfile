@@ -39,6 +39,10 @@ const native_endian = @import("builtin").cpu.arch.endian();
 
 pub const TrrError = error{
     FileNotFound,
+    AccessDenied,
+    IsDir,
+    NoSpaceLeft,
+    IoError,
     InvalidMagic,
     InvalidHeader,
     EndOfFile,
@@ -48,6 +52,16 @@ pub const TrrError = error{
     InvalidAtomCount,
     InvalidFrameData,
 };
+
+fn mapOpenError(err: std.Io.File.OpenError) TrrError {
+    return switch (err) {
+        error.FileNotFound => TrrError.FileNotFound,
+        error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => TrrError.AccessDenied,
+        error.IsDir => TrrError.IsDir,
+        error.NoSpaceLeft => TrrError.NoSpaceLeft,
+        else => TrrError.IoError,
+    };
+}
 
 const TRR_MAGIC: i32 = 1993;
 const DIM: usize = 3;
@@ -106,9 +120,7 @@ pub const TrrReader = struct {
     const Self = @This();
 
     pub fn open(io_handle: std.Io, allocator: Allocator, path: []const u8) !Self {
-        const file = std.Io.Dir.cwd().openFile(io_handle, path, .{}) catch {
-            return TrrError.FileNotFound;
-        };
+        const file = std.Io.Dir.cwd().openFile(io_handle, path, .{ .allow_directory = false }) catch |err| return mapOpenError(err);
         errdefer file.close(io_handle);
 
         const read_buf = allocator.create([READ_BUF_SIZE]u8) catch return TrrError.OutOfMemory;
@@ -393,12 +405,7 @@ pub const TrrWriter = struct {
 
         switch (mode) {
             .write => {
-                const file = std.Io.Dir.cwd().createFile(io_handle, path, .{}) catch |err| {
-                    return switch (err) {
-                        error.FileNotFound => TrrError.FileNotFound,
-                        else => TrrError.WriteError,
-                    };
-                };
+                const file = std.Io.Dir.cwd().createFile(io_handle, path, .{}) catch |err| return mapOpenError(err);
                 errdefer file.close(io_handle);
 
                 const write_buf = allocator.create([WRITE_BUF_SIZE]u8) catch return TrrError.OutOfMemory;
@@ -414,19 +421,14 @@ pub const TrrWriter = struct {
                 };
             },
             .append => {
-                const file = std.Io.Dir.cwd().openFile(io_handle, path, .{ .mode = .read_write }) catch |err| {
-                    return switch (err) {
-                        error.FileNotFound => TrrError.FileNotFound,
-                        else => TrrError.WriteError,
-                    };
-                };
+                const file = std.Io.Dir.cwd().openFile(io_handle, path, .{ .mode = .read_write }) catch |err| return mapOpenError(err);
                 errdefer file.close(io_handle);
 
                 const write_buf = allocator.create([WRITE_BUF_SIZE]u8) catch return TrrError.OutOfMemory;
                 errdefer allocator.destroy(write_buf);
 
                 // Validate natoms from existing file and get file size
-                const file_size = file.length(io_handle) catch return TrrError.ReadError;
+                const file_size = file.length(io_handle) catch return TrrError.IoError;
                 if (file_size > 0) {
                     const read_buf = allocator.create([READ_BUF_SIZE]u8) catch return TrrError.OutOfMemory;
                     defer allocator.destroy(read_buf);
@@ -439,7 +441,7 @@ pub const TrrWriter = struct {
                         .allocator = allocator,
                         .natoms = 0,
                     };
-                    const header = temp_reader.readHeader() catch return TrrError.ReadError;
+                    const header = try temp_reader.readHeader();
                     if (header.natoms != natoms) {
                         return TrrError.InvalidAtomCount;
                     }
@@ -648,6 +650,18 @@ test "TrrReader open non-existent file" {
     const allocator = std.testing.allocator;
     const result = TrrReader.open(std.testing.io, allocator, "non_existent.trr");
     try std.testing.expectError(TrrError.FileNotFound, result);
+}
+
+test "TrrReader open directory returns IsDir" {
+    const allocator = std.testing.allocator;
+    const result = TrrReader.open(std.testing.io, allocator, "test_data");
+    try std.testing.expectError(TrrError.IsDir, result);
+}
+
+test "TrrWriter create on directory path returns IsDir" {
+    const allocator = std.testing.allocator;
+    const result = TrrWriter.open(std.testing.io, allocator, "test_data", 1, .write);
+    try std.testing.expectError(TrrError.IsDir, result);
 }
 
 test "read frame0.trr first frame" {

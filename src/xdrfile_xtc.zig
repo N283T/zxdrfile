@@ -40,7 +40,12 @@ const native_endian = @import("builtin").cpu.arch.endian();
 
 pub const XtcError = error{
     FileNotFound,
+    AccessDenied,
+    IsDir,
+    NoSpaceLeft,
+    IoError,
     InvalidMagic,
+    InvalidHeader,
     EndOfFile,
     ReadError,
     DecompressionError,
@@ -50,6 +55,16 @@ pub const XtcError = error{
     InvalidAtomCount,
     CompressionError,
 };
+
+fn mapOpenError(err: std.Io.File.OpenError) XtcError {
+    return switch (err) {
+        error.FileNotFound => XtcError.FileNotFound,
+        error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => XtcError.AccessDenied,
+        error.IsDir => XtcError.IsDir,
+        error.NoSpaceLeft => XtcError.NoSpaceLeft,
+        else => XtcError.IoError,
+    };
+}
 
 /// XTC file magic number
 const XTC_MAGIC: i32 = 1995;
@@ -300,9 +315,7 @@ pub const XtcReader = struct {
     const Self = @This();
 
     pub fn open(io_handle: std.Io, allocator: Allocator, path: []const u8) !Self {
-        const file = std.Io.Dir.cwd().openFile(io_handle, path, .{}) catch {
-            return XtcError.FileNotFound;
-        };
+        const file = std.Io.Dir.cwd().openFile(io_handle, path, .{ .allow_directory = false }) catch |err| return mapOpenError(err);
         errdefer file.close(io_handle);
 
         const read_buf = allocator.create([READ_BUF_SIZE]u8) catch return XtcError.OutOfMemory;
@@ -685,12 +698,7 @@ pub const XtcWriter = struct {
 
         switch (mode) {
             .write => {
-                const file = std.Io.Dir.cwd().createFile(io_handle, path, .{}) catch |err| {
-                    return switch (err) {
-                        error.FileNotFound => XtcError.FileNotFound,
-                        else => XtcError.WriteError,
-                    };
-                };
+                const file = std.Io.Dir.cwd().createFile(io_handle, path, .{}) catch |err| return mapOpenError(err);
                 errdefer file.close(io_handle);
 
                 const write_buf = allocator.create([WRITE_BUF_SIZE]u8) catch return XtcError.OutOfMemory;
@@ -708,29 +716,30 @@ pub const XtcWriter = struct {
                 };
             },
             .append => {
-                const file = std.Io.Dir.cwd().openFile(io_handle, path, .{ .mode = .read_write }) catch |err| {
-                    return switch (err) {
-                        error.FileNotFound => XtcError.FileNotFound,
-                        else => XtcError.WriteError,
-                    };
-                };
+                const file = std.Io.Dir.cwd().openFile(io_handle, path, .{ .mode = .read_write }) catch |err| return mapOpenError(err);
                 errdefer file.close(io_handle);
 
                 const write_buf = allocator.create([WRITE_BUF_SIZE]u8) catch return XtcError.OutOfMemory;
                 errdefer allocator.destroy(write_buf);
 
                 // Validate natoms from existing file, then seek to end
-                const file_size = file.length(io_handle) catch return XtcError.ReadError;
+                const file_size = file.length(io_handle) catch return XtcError.IoError;
                 if (file_size > 0) {
                     const read_buf = allocator.create([READ_BUF_SIZE]u8) catch return XtcError.OutOfMemory;
                     defer allocator.destroy(read_buf);
 
                     var temp_reader = file.reader(io_handle, read_buf);
-                    const magic_buf = temp_reader.interface.takeArray(4) catch return XtcError.ReadError;
+                    const magic_buf = temp_reader.interface.takeArray(4) catch |err| return switch (err) {
+                        error.EndOfStream => XtcError.InvalidHeader,
+                        error.ReadFailed => XtcError.ReadError,
+                    };
                     const magic: i32 = @bitCast(std.mem.readInt(u32, magic_buf, .big));
                     if (magic != XTC_MAGIC) return XtcError.InvalidMagic;
 
-                    const natoms_buf = temp_reader.interface.takeArray(4) catch return XtcError.ReadError;
+                    const natoms_buf = temp_reader.interface.takeArray(4) catch |err| return switch (err) {
+                        error.EndOfStream => XtcError.InvalidHeader,
+                        error.ReadFailed => XtcError.ReadError,
+                    };
                     const file_natoms: i32 = @bitCast(std.mem.readInt(u32, natoms_buf, .big));
                     if (file_natoms != natoms) return XtcError.InvalidAtomCount;
                 }
@@ -1081,6 +1090,24 @@ pub const XtcWriter = struct {
 // ============================================
 // Tests
 // ============================================
+
+test "XtcReader open non-existent file" {
+    const allocator = std.testing.allocator;
+    const result = XtcReader.open(std.testing.io, allocator, "non_existent.xtc");
+    try std.testing.expectError(XtcError.FileNotFound, result);
+}
+
+test "XtcReader open directory returns IsDir" {
+    const allocator = std.testing.allocator;
+    const result = XtcReader.open(std.testing.io, allocator, "test_data");
+    try std.testing.expectError(XtcError.IsDir, result);
+}
+
+test "XtcWriter create on directory path returns IsDir" {
+    const allocator = std.testing.allocator;
+    const result = XtcWriter.open(std.testing.io, allocator, "test_data", 10, .write);
+    try std.testing.expectError(XtcError.IsDir, result);
+}
 
 test "sizeofint" {
     try std.testing.expectEqual(@as(u32, 0), sizeofint(0));

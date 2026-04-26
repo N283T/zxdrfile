@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+
+- **More accurate error reporting**: `XtcError` and `TrrError` gained
+  `AccessDenied`, `IsDir`, `NoSpaceLeft`, and `IoError` variants.
+  `XtcError` also gained `InvalidHeader` for truncated headers on append.
+  Previously these were all collapsed into `FileNotFound`/`ReadError`/`WriteError`,
+  which made debugging open/create failures impossible.
+- `XtcReader.open` and `TrrReader.open` now reject directories at open time
+  (via `allow_directory = false`) instead of failing later with a generic
+  `ReadError`. (#25)
+- `TrrWriter.open` append-mode now propagates `InvalidMagic` and `InvalidHeader`
+  from the existing-file probe instead of collapsing them to `ReadError`. (#26)
+- `XtcWriter.open` append-mode now reports `InvalidHeader` for truncated files
+  instead of generic `ReadError`. (#26)
+- `XtcReader.open` now classifies a non-positive natoms in the header as
+  `InvalidAtomCount` instead of `ReadError`.
+- `benchmark` now logs non-FileNotFound failures (corrupt JSON, permission
+  errors) instead of silently skipping them. (#28)
+
+### Fixed
+
+- Closes #25, #26, #27, #28.
+
 ## [0.3.0] - 2026-04-26
 
 ### Changed (BREAKING)
