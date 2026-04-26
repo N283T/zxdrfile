@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.4.0] - 2026-04-26
 
 ### Changed
 
@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   `AccessDenied`, `IsDir`, `NoSpaceLeft`, and `IoError` variants.
   `XtcError` also gained `InvalidHeader` for truncated headers on append.
   Previously these were all collapsed into `FileNotFound`/`ReadError`/`WriteError`,
-  which made debugging open/create failures impossible.
+  which made debugging open/create failures impossible. (#25, #26, #27)
 - `XtcReader.open` and `TrrReader.open` now reject directories at open time
   (via `allow_directory = false`) instead of failing later with a generic
   `ReadError`. (#25)
@@ -25,9 +25,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - `benchmark` now logs non-FileNotFound failures (corrupt JSON, permission
   errors) instead of silently skipping them. (#28)
 
-### Fixed
+### Added
 
-- Closes #25, #26, #27, #28.
+- macOS to CI matrix and run cross-format tests on every push (#31, #29)
+- `zig build converter-smoke` end-to-end smoke test of the converter binary
+  exercising the full `std.process.Init` plumbing (#33, #30)
+- IsDir tests for both readers and writers
+
+### Compatibility
+
+The new error variants are technically additive, but exhaustive switches over
+`XtcError` / `TrrError` will need new arms — hence minor bump.
 
 ## [0.3.0] - 2026-04-26
 
