@@ -37,13 +37,21 @@ const Reference = struct {
 };
 
 fn loadReference(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !?std.json.Parsed(Reference) {
-    const data = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024)) catch return null;
+    const data = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024)) catch |err| {
+        if (err != error.FileNotFound) {
+            std.debug.print("  warning: failed to load reference {s}: {s}\n", .{ path, @errorName(err) });
+        }
+        return null;
+    };
     defer allocator.free(data);
 
     return std.json.parseFromSlice(Reference, allocator, data, .{
         .allocate = .alloc_always,
         .ignore_unknown_fields = true,
-    }) catch null;
+    }) catch |err| {
+        std.debug.print("  warning: failed to parse reference {s}: {s}\n", .{ path, @errorName(err) });
+        return null;
+    };
 }
 
 fn validateFrame(coords: []f32, ref_coords: []f64, tolerance: f32) bool {
@@ -64,7 +72,12 @@ fn elapsedMs(io: std.Io, start: std.Io.Timestamp) f64 {
 
 fn benchmarkXtc(io: std.Io, allocator: std.mem.Allocator, path: []const u8, name: []const u8, ref_path: ?[]const u8) !?BenchResult {
     const file_size = blk: {
-        const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch return null;
+        const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| {
+            if (err != error.FileNotFound) {
+                std.debug.print("  [skip] {s}: stat failed: {s}\n", .{ name, @errorName(err) });
+            }
+            return null;
+        };
         break :blk stat.size;
     };
 
@@ -75,7 +88,10 @@ fn benchmarkXtc(io: std.Io, allocator: std.mem.Allocator, path: []const u8, name
         parsed_ref = try loadReference(io, allocator, rp);
     }
 
-    var reader = XtcReader.open(io, allocator, path) catch return null;
+    var reader = XtcReader.open(io, allocator, path) catch |err| {
+        std.debug.print("  [skip] {s}: open failed: {s}\n", .{ name, @errorName(err) });
+        return null;
+    };
     defer reader.close();
 
     const natoms = reader.getNumAtoms();
@@ -133,7 +149,12 @@ fn benchmarkXtc(io: std.Io, allocator: std.mem.Allocator, path: []const u8, name
 
 fn benchmarkTrr(io: std.Io, allocator: std.mem.Allocator, path: []const u8, name: []const u8, ref_path: ?[]const u8) !?BenchResult {
     const file_size = blk: {
-        const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch return null;
+        const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| {
+            if (err != error.FileNotFound) {
+                std.debug.print("  [skip] {s}: stat failed: {s}\n", .{ name, @errorName(err) });
+            }
+            return null;
+        };
         break :blk stat.size;
     };
 
@@ -143,7 +164,10 @@ fn benchmarkTrr(io: std.Io, allocator: std.mem.Allocator, path: []const u8, name
         parsed_ref = try loadReference(io, allocator, rp);
     }
 
-    var reader = TrrReader.open(io, allocator, path) catch return null;
+    var reader = TrrReader.open(io, allocator, path) catch |err| {
+        std.debug.print("  [skip] {s}: open failed: {s}\n", .{ name, @errorName(err) });
+        return null;
+    };
     defer reader.close();
 
     const natoms = reader.getNumAtoms();
