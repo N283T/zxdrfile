@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Archived] - 2026-05-21
+
+### Changed
+
+- Mark this standalone repository as archived. Ongoing trajectory I/O development
+  is now managed in [ztraj](https://github.com/N283T/ztraj).
+
 ## [0.4.0] - 2026-04-26
 
 ### Changed

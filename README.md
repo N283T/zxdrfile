@@ -1,5 +1,10 @@
 # zxdrfile
 
+> **Archived:** This repository is now in maintenance/archive mode.
+> XTC/TRR trajectory I/O is managed as part of [ztraj](https://github.com/N283T/ztraj),
+> which is the recommended place for new development, bug fixes, and usage.
+> This repository remains available as a historical standalone Zig xdrfile implementation.
+
 [![Zig](https://img.shields.io/badge/Zig-0.16.0+-f7a41d?logo=zig&logoColor=white)](https://ziglang.org/)
 [![CI](https://github.com/N283T/zxdrfile/actions/workflows/ci.yml/badge.svg)](https://github.com/N283T/zxdrfile/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-BSD_2--Clause-blue.svg)](LICENSE)
@@ -7,6 +12,15 @@
 A high-performance Zig library for reading and writing GROMACS XDR trajectory files (XTC and TRR formats).
 
 [**API Documentation**](https://n283t.github.io/zxdrfile/)
+
+## Repository Status
+
+This standalone package has been archived because trajectory I/O is now managed
+in the unified [ztraj](https://github.com/N283T/ztraj) repository. Use ztraj for
+ongoing development and new integrations.
+
+The code here is kept for reference and for existing users pinned to zxdrfile,
+but no new feature work is planned in this repository.
 
 ## Features
 
@@ -17,6 +31,10 @@ A high-performance Zig library for reading and writing GROMACS XDR trajectory fi
 - **Append mode** -- Append frames to existing trajectory files with natoms validation
 
 ## Installation
+
+> **For new projects:** prefer [ztraj](https://github.com/N283T/ztraj).
+> The instructions below are retained for existing users who intentionally depend
+> on the archived standalone `zxdrfile` package.
 
 Add as a dependency in your `build.zig.zon`:
 
